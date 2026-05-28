@@ -1582,7 +1582,7 @@ public_programs = []
 
 #subdir('src/libudev')
 subdir('src/shared')
-#subdir('src/core')
+subdir('src/core')
 #subdir('src/shutdown')
 #subdir('src/udev')
 #subdir('src/network')
