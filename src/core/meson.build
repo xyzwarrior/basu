@@ -156,7 +156,7 @@ libcore_sources = '''
 #        libcore_shared_sources,
 #        include_directories : includes,
 #        dependencies : [versiondep,
-                        libmount])
+#                        libmount])
 
 #libcore = static_library(
 #        'core',
