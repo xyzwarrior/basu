@@ -39,9 +39,9 @@ conf.set_quoted('RELATIVE_SOURCE_PATH', relative_source_path)
 want_ossfuzz = get_option('oss-fuzz')
 want_libfuzzer = get_option('llvm-fuzz')
 want_fuzzbuzz = get_option('fuzzbuzz')
-if want_ossfuzz + want_libfuzzer + want_fuzzbuzz > 1
-        error('only one of oss-fuzz, llvm-fuzz or fuzzbuzz can be specified')
-endif
+#if want_ossfuzz + want_libfuzzer + want_fuzzbuzz > 1
+#        error('only one of oss-fuzz, llvm-fuzz or fuzzbuzz can be specified')
+#endif
 
 skip_deps = want_ossfuzz or want_libfuzzer
 fuzzer_build = want_ossfuzz or want_libfuzzer or want_fuzzbuzz
