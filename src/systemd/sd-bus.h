@@ -19,6 +19,7 @@
 
 #include <inttypes.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 
@@ -32,6 +33,12 @@ _SD_BEGIN_DECLARATIONS;
 #define SD_BUS_DEFAULT ((sd_bus *) 1)
 #define SD_BUS_DEFAULT_USER ((sd_bus *) 2)
 #define SD_BUS_DEFAULT_SYSTEM ((sd_bus *) 3)
+
+/* https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-marshaling-signature */
+#define SD_BUS_MAXIMUM_SIGNATURE_LENGTH 255
+
+/* https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names */
+#define SD_BUS_MAXIMUM_NAME_LENGTH 255
 
 /* Types */
 
@@ -99,6 +106,11 @@ enum {
         SD_BUS_NAME_QUEUE             = 1ULL << 2
 };
 
+enum {
+        SD_BUS_MESSAGE_DUMP_WITH_HEADER  = 1ULL << 0,
+        SD_BUS_MESSAGE_DUMP_SUBTREE_ONLY = 1ULL << 1,
+};
+
 /* Callbacks */
 
 typedef int (*sd_bus_message_handler_t)(sd_bus_message *m, void *userdata, sd_bus_error *ret_error);
@@ -107,7 +119,7 @@ typedef int (*sd_bus_property_set_t) (sd_bus *bus, const char *path, const char 
 typedef int (*sd_bus_object_find_t) (sd_bus *bus, const char *path, const char *interface, void *userdata, void **ret_found, sd_bus_error *ret_error);
 typedef int (*sd_bus_node_enumerator_t) (sd_bus *bus, const char *prefix, void *userdata, char ***ret_nodes, sd_bus_error *ret_error);
 typedef int (*sd_bus_track_handler_t) (sd_bus_track *track, void *userdata);
-typedef void (*sd_bus_destroy_t)(void *userdata);
+typedef _sd_destroy_t sd_bus_destroy_t;
 
 #include "sd-bus-protocol.h"
 #include "sd-bus-vtable.h"
@@ -170,6 +182,7 @@ void sd_bus_close(sd_bus *bus);
 
 sd_bus *sd_bus_ref(sd_bus *bus);
 sd_bus *sd_bus_unref(sd_bus *bus);
+sd_bus *sd_bus_close_unref(sd_bus *bus);
 sd_bus *sd_bus_flush_close_unref(sd_bus *bus);
 
 void sd_bus_default_flush_close(void);
@@ -194,6 +207,7 @@ int sd_bus_process(sd_bus *bus, sd_bus_message **r);
 int sd_bus_process_priority(sd_bus *bus, int64_t max_priority, sd_bus_message **r);
 int sd_bus_wait(sd_bus *bus, uint64_t timeout_usec);
 int sd_bus_flush(sd_bus *bus);
+int sd_bus_enqueue_for_read(sd_bus *bus, sd_bus_message *m);
 
 sd_bus_slot* sd_bus_get_current_slot(sd_bus *bus);
 sd_bus_message* sd_bus_get_current_message(sd_bus *bus);
@@ -321,6 +335,9 @@ int sd_bus_message_peek_type(sd_bus_message *m, char *type, const char **content
 int sd_bus_message_verify_type(sd_bus_message *m, char type, const char *contents);
 int sd_bus_message_at_end(sd_bus_message *m, int complete);
 int sd_bus_message_rewind(sd_bus_message *m, int complete);
+int sd_bus_message_sensitive(sd_bus_message *m);
+
+int sd_bus_message_dump(sd_bus_message *m, FILE *f, uint64_t flags);
 
 /* Bus management */
 
@@ -493,6 +510,7 @@ int sd_bus_track_get_destroy_callback(sd_bus_track *s, sd_bus_destroy_t *ret);
 
 /* Define helpers so that __attribute__((cleanup(sd_bus_unrefp))) and similar may be used. */
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus, sd_bus_unref);
+_SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus, sd_bus_close_unref);
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus, sd_bus_flush_close_unref);
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus_slot, sd_bus_slot_unref);
 _SD_DEFINE_POINTER_CLEANUP_FUNC(sd_bus_message, sd_bus_message_unref);

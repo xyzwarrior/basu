@@ -4,9 +4,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/timerfd.h>
 #include <sys/timex.h>
@@ -14,21 +12,21 @@
 #include <unistd.h>
 
 #include "alloc-util.h"
-#include "def.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "fs-util.h"
 #include "io-util.h"
 #include "log.h"
 #include "macro.h"
+#include "missing_timerfd.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "process-util.h"
-#include "serialize.h"
 #include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "time-util.h"
+#include "missing_stdlib.h"
 
 static clockid_t map_clock_id(clockid_t c) {
 
@@ -268,13 +266,12 @@ static char *format_timestamp_internal(
 
         assert(buf);
 
-        if (l <
-            3 +                  /* week day */
-            1 + 10 +             /* space and date */
-            1 + 8 +              /* space and time */
-            (us ? 1 + 6 : 0) +   /* "." and microsecond part */
-            1 + 1 +              /* space and shortest possible zone */
-            1)
+        if (l < (size_t) (3 +                  /* week day */
+                          1 + 10 +             /* space and date */
+                          1 + 8 +              /* space and time */
+                          (us ? 1 + 6 : 0) +   /* "." and microsecond part */
+                          1 + 1 +              /* space and shortest possible zone */
+                          1))
                 return NULL; /* Not enough space even for the shortest form. */
         if (t <= 0 || t == USEC_INFINITY)
                 return NULL; /* Timestamp is unset */
@@ -576,7 +573,6 @@ static int parse_timestamp_impl(const char *t, usec_t *usec, bool with_tz) {
          */
 
         assert(t);
-        assert(usec);
 
         if (t[0] == '@' && !with_tz)
                 return parse_sec(t + 1, usec);
@@ -804,8 +800,8 @@ finish:
         else
                 return -EINVAL;
 
-        *usec = ret;
-
+        if (usec)
+                *usec = ret;
         return 0;
 }
 
@@ -837,8 +833,12 @@ int parse_timestamp(const char *t, usec_t *usec) {
         }
         if (r == 0) {
                 bool with_tz = true;
+                char *colon_tz;
 
-                if (setenv("TZ", tz, 1) != 0) {
+                /* tzset(3) says $TZ should be prefixed with ":" if we reference timezone files */
+                colon_tz = strjoina(":", tz);
+
+                if (setenv("TZ", colon_tz, 1) != 0) {
                         shared->return_value = negative_errno();
                         _exit(EXIT_FAILURE);
                 }
@@ -862,7 +862,7 @@ int parse_timestamp(const char *t, usec_t *usec) {
         if (munmap(shared, sizeof *shared) != 0)
                 return negative_errno();
 
-        if (tmp.return_value == 0)
+        if (tmp.return_value == 0 && usec)
                 *usec = tmp.usec;
 
         return tmp.return_value;
@@ -924,7 +924,6 @@ int parse_time(const char *t, usec_t *usec, usec_t default_unit) {
         bool something = false;
 
         assert(t);
-        assert(usec);
         assert(default_unit > 0);
 
         p = t;
@@ -936,7 +935,8 @@ int parse_time(const char *t, usec_t *usec, usec_t default_unit) {
                 if (*s != 0)
                         return -EINVAL;
 
-                *usec = USEC_INFINITY;
+                if (usec)
+                        *usec = USEC_INFINITY;
                 return 0;
         }
 
@@ -1008,8 +1008,8 @@ int parse_time(const char *t, usec_t *usec, usec_t default_unit) {
                 }
         }
 
-        *usec = r;
-
+        if (usec)
+                *usec = r;
         return 0;
 }
 
@@ -1030,6 +1030,15 @@ int parse_sec_fix_0(const char *t, usec_t *ret) {
 
         *ret = k == 0 ? USEC_INFINITY : k;
         return r;
+}
+
+int parse_sec_def_infinity(const char *t, usec_t *ret) {
+        t += strspn(t, WHITESPACE);
+        if (isempty(t)) {
+                *ret = USEC_INFINITY;
+                return 0;
+        }
+        return parse_sec(t, ret);
 }
 
 static const char* extract_nsec_multiplier(const char *p, nsec_t *multiplier) {
@@ -1185,7 +1194,10 @@ bool ntp_synced(void) {
         if (adjtimex(&txc) < 0)
                 return false;
 
-        if (txc.status & STA_UNSYNC)
+        /* Consider the system clock synchronized if the reported maximum error is smaller than the maximum
+         * value (16 seconds). Ignore the STA_UNSYNC flag as it may have been set to prevent the kernel from
+         * touching the RTC. */
+        if (txc.maxerror >= 16000000)
                 return false;
 
         return true;
@@ -1206,7 +1218,7 @@ int get_timezones(char ***ret) {
         n_allocated = 2;
         n_zones = 1;
 
-        f = fopen("/usr/share/zoneinfo/zone.tab", "re");
+        f = fopen("/usr/share/zoneinfo/zone1970.tab", "re");
         if (f) {
                 for (;;) {
                         _cleanup_free_ char *line = NULL;
@@ -1251,6 +1263,7 @@ int get_timezones(char ***ret) {
                 }
 
                 strv_sort(zones);
+                strv_uniq(zones);
 
         } else if (errno != ENOENT)
                 return -errno;
@@ -1269,6 +1282,10 @@ bool timezone_is_valid(const char *name, int log_level) {
 
         if (isempty(name))
                 return false;
+
+        /* Always accept "UTC" as valid timezone, since it's the fallback, even if user has no timezones installed. */
+        if (streq(name, "UTC"))
+                return true;
 
         if (name[0] == '/')
                 return false;
@@ -1375,19 +1392,26 @@ bool clock_supported(clockid_t clock) {
         }
 }
 
-int get_timezone(char **tz) {
+int get_timezone(char **ret) {
         _cleanup_free_ char *t = NULL;
         const char *e;
         char *z;
         int r;
 
         r = readlink_malloc("/etc/localtime", &t);
+        if (r == -ENOENT) {
+                /* If the symlink does not exist, assume "UTC", like glibc does*/
+                z = strdup("UTC");
+                if (!z)
+                        return -ENOMEM;
+
+                *ret = z;
+                return 0;
+        }
         if (r < 0)
                 return r; /* returns EINVAL if not a symlink */
 
-        e = path_startswith(t, "/usr/share/zoneinfo/");
-        if (!e)
-                e = path_startswith(t, "../usr/share/zoneinfo/");
+        e = PATH_STARTSWITH_SET(t, "/usr/share/zoneinfo/", "../usr/share/zoneinfo/");
         if (!e)
                 return -EINVAL;
 
@@ -1398,7 +1422,7 @@ int get_timezone(char **tz) {
         if (!z)
                 return -ENOMEM;
 
-        *tz = z;
+        *ret = z;
         return 0;
 }
 
@@ -1410,8 +1434,8 @@ struct tm *localtime_or_gmtime_r(const time_t *t, struct tm *tm, bool utc) {
         return utc ? gmtime_r(t, tm) : localtime_r(t, tm);
 }
 
-unsigned long usec_to_jiffies(usec_t u) {
-        static thread_local unsigned long hz = 0;
+static uint32_t sysconf_clock_ticks_cached(void) {
+        static thread_local uint32_t hz = 0;
         long r;
 
         if (hz == 0) {
@@ -1421,7 +1445,17 @@ unsigned long usec_to_jiffies(usec_t u) {
                 hz = r;
         }
 
-        return DIV_ROUND_UP(u , USEC_PER_SEC / hz);
+        return hz;
+}
+
+uint32_t usec_to_jiffies(usec_t u) {
+        uint32_t hz = sysconf_clock_ticks_cached();
+        return DIV_ROUND_UP(u, USEC_PER_SEC / hz);
+}
+
+usec_t jiffies_to_usec(uint32_t j) {
+        uint32_t hz = sysconf_clock_ticks_cached();
+        return DIV_ROUND_UP(j * USEC_PER_SEC, hz);
 }
 
 usec_t usec_shift_clock(usec_t x, clockid_t from, clockid_t to) {
@@ -1467,8 +1501,29 @@ int time_change_fd(void) {
         if (fd < 0)
                 return -errno;
 
-        if (timerfd_settime(fd, TFD_TIMER_ABSTIME|TFD_TIMER_CANCEL_ON_SET, &its, NULL) < 0)
-                return -errno;
+        if (timerfd_settime(fd, TFD_TIMER_ABSTIME|TFD_TIMER_CANCEL_ON_SET, &its, NULL) >= 0)
+                return TAKE_FD(fd);
 
-        return TAKE_FD(fd);
+        /* So apparently there are systems where time_t is 64bit, but the kernel actually doesn't support
+         * 64bit time_t. In that case configuring a timer to TIME_T_MAX will fail with EOPNOTSUPP or a
+         * similar error. If that's the case let's try with INT32_MAX instead, maybe that works. It's a bit
+         * of a black magic thing though, but what can we do?
+         *
+         * We don't want this code on x86-64, hence let's conditionalize this for systems with 64bit time_t
+         * but where "long" is shorter than 64bit, i.e. 32bit archs.
+         *
+         * See: https://github.com/systemd/systemd/issues/14362 */
+
+#if SIZEOF_TIME_T == 8 && ULONG_MAX < UINT64_MAX
+        if (ERRNO_IS_NOT_SUPPORTED(errno) || errno == EOVERFLOW) {
+                static const struct itimerspec its32 = {
+                        .it_value.tv_sec = INT32_MAX,
+                };
+
+                if (timerfd_settime(fd, TFD_TIMER_ABSTIME|TFD_TIMER_CANCEL_ON_SET, &its32, NULL) >= 0)
+                        return TAKE_FD(fd);
+        }
+#endif
+
+        return -errno;
 }

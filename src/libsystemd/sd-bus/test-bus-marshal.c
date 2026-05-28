@@ -20,6 +20,7 @@
 #include "bus-util.h"
 #include "escape.h"
 #include "fd-util.h"
+#include "fileio.h"
 #include "log.h"
 #include "tests.h"
 #include "util.h"
@@ -187,10 +188,10 @@ int main(int argc, char *argv[]) {
         r = sd_bus_message_seal(m, 4711, 0);
         assert_se(r >= 0);
 
-        bus_message_dump(m, stdout, BUS_MESSAGE_DUMP_WITH_HEADER);
+        sd_bus_message_dump(m, stdout, SD_BUS_MESSAGE_DUMP_WITH_HEADER);
 
-        ms = open_memstream(&first, &first_size);
-        bus_message_dump(m, ms, 0);
+        ms = open_memstream_unlocked(&first, &first_size);
+        sd_bus_message_dump(m, ms, 0);
         fflush(ms);
         assert_se(!ferror(ms));
 
@@ -202,7 +203,8 @@ int main(int argc, char *argv[]) {
         log_info("message size = %zu, contents =\n%s", sz, h);
 
 #if HAVE_GLIB
-#ifndef __SANITIZE_ADDRESS__
+        /* Work-around for asan bug. See c8d980a3e962aba2ea3a4cedf75fa94890a6d746. */
+#if !HAS_FEATURE_ADDRESS_SANITIZER
         {
                 GDBusMessage *g;
                 char *p;
@@ -242,11 +244,11 @@ int main(int argc, char *argv[]) {
         r = bus_message_from_malloc(bus, buffer, sz, NULL, 0, NULL, &m);
         assert_se(r >= 0);
 
-        bus_message_dump(m, stdout, BUS_MESSAGE_DUMP_WITH_HEADER);
+        sd_bus_message_dump(m, stdout, SD_BUS_MESSAGE_DUMP_WITH_HEADER);
 
         fclose(ms);
-        ms = open_memstream(&second, &second_size);
-        bus_message_dump(m, ms, 0);
+        ms = open_memstream_unlocked(&second, &second_size);
+        sd_bus_message_dump(m, ms, 0);
         fflush(ms);
         assert_se(!ferror(ms));
         assert_se(first_size == second_size);
@@ -351,8 +353,8 @@ int main(int argc, char *argv[]) {
         assert_se(r >= 0);
 
         fclose(ms);
-        ms = open_memstream(&third, &third_size);
-        bus_message_dump(copy, ms, 0);
+        ms = open_memstream_unlocked(&third, &third_size);
+        sd_bus_message_dump(copy, ms, 0);
         fflush(ms);
         assert_se(!ferror(ms));
 

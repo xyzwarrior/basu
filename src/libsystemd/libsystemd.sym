@@ -659,6 +659,7 @@ global:
         sd_device_monitor_attach_event;
         sd_device_monitor_detach_event;
         sd_device_monitor_get_event;
+        sd_device_monitor_get_event_source;
         sd_device_monitor_start;
         sd_device_monitor_stop;
 
@@ -670,3 +671,29 @@ global:
         sd_event_source_get_floating;
         sd_event_source_set_floating;
 } LIBSYSTEMD_239;
+
+LIBSYSTEMD_241 {
+global:
+        sd_bus_close_unref;
+} LIBSYSTEMD_240;
+
+LIBSYSTEMD_243 {
+global:
+        sd_bus_object_vtable_format;
+        sd_event_source_disable_unref;
+} LIBSYSTEMD_241;
+
+LIBSYSTEMD_245 {
+global:
+        sd_bus_enqueue_for_read;
+        sd_bus_message_dump;
+        sd_bus_message_sensitive;
+        sd_event_add_child_pidfd;
+        sd_event_source_get_child_pidfd;
+        sd_event_source_get_child_pidfd_own;
+        sd_event_source_set_child_pidfd_own;
+        sd_event_source_get_child_process_own;
+        sd_event_source_set_child_process_own;
+        sd_event_source_send_child_signal;
+        sd_journal_open_namespace;
+} LIBSYSTEMD_243;

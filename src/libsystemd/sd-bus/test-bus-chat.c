@@ -12,6 +12,7 @@
 #include "bus-internal.h"
 #include "bus-match.h"
 #include "bus-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "log.h"
@@ -144,7 +145,7 @@ static int server(sd_bus *bus) {
                          strna(sd_bus_message_get_member(m)),
                          pid,
                          strna(label));
-                /* bus_message_dump(m); */
+                /* sd_bus_message_dump(m); */
                 /* sd_bus_message_rewind(m, true); */
 
                 if (sd_bus_message_is_method_call(m, "org.freedesktop.systemd.test", "LowerCase")) {
@@ -245,7 +246,7 @@ fail:
         return r;
 }
 
-static void* client1(void*p) {
+static void* client1(void *p) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *reply = NULL;
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
@@ -308,7 +309,7 @@ static void* client1(void*p) {
 
         errno = 0;
         if (read(pp[0], &x, 1) <= 0) {
-                log_error("Failed to read from pipe: %s", errno ? strerror(errno) : "early read");
+                log_error("Failed to read from pipe: %s", errno != 0 ? strerror_safe(errno) : "early read");
                 goto finish;
         }
 
@@ -344,7 +345,7 @@ static int quit_callback(sd_bus_message *m, void *userdata, sd_bus_error *ret_er
         return 1;
 }
 
-static void* client2(void*p) {
+static void* client2(void *p) {
         _cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL, *reply = NULL;
         _cleanup_(sd_bus_flush_close_unrefp) sd_bus *bus = NULL;
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;

@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <errno.h>
-#include <sys/resource.h>
 
 #include "alloc-util.h"
 #include "extract-word.h"
 #include "fd-util.h"
 #include "format-util.h"
 #include "macro.h"
-#include "missing.h"
+#include "missing_resource.h"
 #include "rlimit-util.h"
 #include "string-table.h"
 #include "time-util.h"
@@ -388,4 +387,23 @@ int rlimit_nofile_bump(int limit) {
                 return log_debug_errno(r, "Failed to set RLIMIT_NOFILE: %m");
 
         return 0;
+}
+
+int rlimit_nofile_safe(void) {
+        struct rlimit rl;
+
+        /* Resets RLIMIT_NOFILE's soft limit FD_SETSIZE (i.e. 1024), for compatibility with software still using
+         * select() */
+
+        if (getrlimit(RLIMIT_NOFILE, &rl) < 0)
+                return log_debug_errno(errno, "Failed to query RLIMIT_NOFILE: %m");
+
+        if (rl.rlim_cur <= FD_SETSIZE)
+                return 0;
+
+        rl.rlim_cur = FD_SETSIZE;
+        if (setrlimit(RLIMIT_NOFILE, &rl) < 0)
+                return log_debug_errno(errno, "Failed to lower RLIMIT_NOFILE's soft limit to " RLIM_FMT ": %m", rl.rlim_cur);
+
+        return 1;
 }

@@ -43,7 +43,7 @@ bool object_path_is_valid(const char *p) {
         if (slash)
                 return false;
 
-        return true;
+        return (q - p) <= BUS_PATH_SIZE_MAX;
 }
 
 char* object_path_startswith(const char *a, const char *b) {
@@ -97,7 +97,7 @@ bool interface_name_is_valid(const char *p) {
                         dot = false;
                 }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         if (dot)
@@ -139,7 +139,7 @@ bool service_name_is_valid(const char *p) {
                         dot = false;
                 }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         if (dot)
@@ -149,26 +149,6 @@ bool service_name_is_valid(const char *p) {
                 return false;
 
         return true;
-}
-
-char* service_name_startswith(const char *a, const char *b) {
-        const char *p;
-
-        if (!service_name_is_valid(a) ||
-            !service_name_is_valid(b))
-                return NULL;
-
-        p = startswith(a, b);
-        if (!p)
-                return NULL;
-
-        if (*p == 0)
-                return (char*) p;
-
-        if (*p == '.')
-                return (char*) p + 1;
-
-        return NULL;
 }
 
 bool member_name_is_valid(const char *p) {
@@ -190,7 +170,7 @@ bool member_name_is_valid(const char *p) {
                         return false;
         }
 
-        if (q - p > 255)
+        if (q - p > SD_BUS_MAXIMUM_NAME_LENGTH)
                 return false;
 
         return true;
@@ -200,7 +180,7 @@ bool member_name_is_valid(const char *p) {
  * Complex pattern match
  * This checks whether @a is a 'complex-prefix' of @b, or @b is a
  * 'complex-prefix' of @a, based on strings that consist of labels with @c as
- * spearator. This function returns true if:
+ * separator. This function returns true if:
  *   - both strings are equal
  *   - either is a prefix of the other and ends with @c
  * The second rule makes sure that either string needs to be fully included in

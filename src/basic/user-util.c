@@ -1,27 +1,24 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <alloca.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <grp.h>
-#include <pwd.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utmp.h>
 
 #include "alloc-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-util.h"
 #include "macro.h"
-#include "missing.h"
 #include "parse-util.h"
 #include "path-util.h"
+#include "random-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "user-util.h"
@@ -55,13 +52,36 @@ int parse_uid(const char *s, uid_t *ret) {
 
         if (!uid_is_valid(uid))
                 return -ENXIO; /* we return ENXIO instead of EINVAL
-                                * here, to make it easy to distuingish
+                                * here, to make it easy to distinguish
                                 * invalid numeric uids from invalid
                                 * strings. */
 
         if (ret)
                 *ret = uid;
 
+        return 0;
+}
+
+int parse_uid_range(const char *s, uid_t *ret_lower, uid_t *ret_upper) {
+        uint32_t u, l;
+        int r;
+
+        assert(s);
+        assert(ret_lower);
+        assert(ret_upper);
+
+        r = parse_range(s, &l, &u);
+        if (r < 0)
+                return r;
+
+        if (l > u)
+                return -EINVAL;
+
+        if (!uid_is_valid(l) || !uid_is_valid(u))
+                return -ENXIO;
+
+        *ret_lower = l;
+        *ret_upper = u;
         return 0;
 }
 
@@ -80,14 +100,14 @@ char* getlogname_malloc(void) {
 char *getusername_malloc(void) {
         const char *e;
 
-        e = getenv("USER");
+        e = secure_getenv("USER");
         if (e)
                 return strdup(e);
 
         return uid_to_name(getuid());
 }
 
-static inline bool is_nologin_shell(const char *shell) {
+bool is_nologin_shell(const char *shell) {
 
         return PATH_IN_SET(shell,
                            /* 'nologin' is the friendliest way to disable logins for a user account. It prints a nice
@@ -146,7 +166,7 @@ static int synthesize_user_creds(
                         *home = FLAGS_SET(flags, USER_CREDS_CLEAN) ? NULL : "/";
 
                 if (shell)
-                        *shell = FLAGS_SET(flags, USER_CREDS_CLEAN) ? NULL : "/sbin/nologin";
+                        *shell = FLAGS_SET(flags, USER_CREDS_CLEAN) ? NULL : NOLOGIN;
 
                 return 0;
         }
@@ -212,7 +232,7 @@ int get_user_creds(
                 p = getpwnam(*username);
         }
         if (!p) {
-                r = errno > 0 ? -errno : -ESRCH;
+                r = errno_or_else(ESRCH);
 
                 /* If the user requested that we only synthesize as fallback, do so now */
                 if (FLAGS_SET(flags, USER_CREDS_PREFER_NSS)) {
@@ -238,14 +258,21 @@ int get_user_creds(
         }
 
         if (home) {
-                if (FLAGS_SET(flags, USER_CREDS_CLEAN) && empty_or_root(p->pw_dir))
-                        *home = NULL;
+                if (FLAGS_SET(flags, USER_CREDS_CLEAN) &&
+                    (empty_or_root(p->pw_dir) ||
+                     !path_is_valid(p->pw_dir) ||
+                     !path_is_absolute(p->pw_dir)))
+                    *home = NULL; /* Note: we don't insist on normalized paths, since there are setups that have /./ in the path */
                 else
                         *home = p->pw_dir;
         }
 
         if (shell) {
-                if (FLAGS_SET(flags, USER_CREDS_CLEAN) && (isempty(p->pw_shell) || is_nologin_shell(p->pw_shell)))
+                if (FLAGS_SET(flags, USER_CREDS_CLEAN) &&
+                    (isempty(p->pw_shell) ||
+                     !path_is_valid(p->pw_dir) ||
+                     !path_is_absolute(p->pw_shell) ||
+                     is_nologin_shell(p->pw_shell)))
                         *shell = NULL;
                 else
                         *shell = p->pw_shell;
@@ -299,7 +326,7 @@ int get_group_creds(const char **groupname, gid_t *gid, UserCredsFlags flags) {
         }
 
         if (!g)
-                return errno > 0 ? -errno : -ESRCH;
+                return errno_or_else(ESRCH);
 
         if (gid) {
                 if (!gid_is_valid(g->gr_gid))
@@ -343,6 +370,9 @@ char* uid_to_name(uid_t uid) {
                         if (r != ERANGE)
                                 break;
 
+                        if (bufsize > LONG_MAX/2) /* overflow check */
+                                return NULL;
+
                         bufsize *= 2;
                 }
         }
@@ -384,6 +414,9 @@ char* gid_to_name(gid_t gid) {
                         if (r != ERANGE)
                                 break;
 
+                        if (bufsize > LONG_MAX/2) /* overflow check */
+                                return NULL;
+
                         bufsize *= 2;
                 }
         }
@@ -394,10 +427,16 @@ char* gid_to_name(gid_t gid) {
         return ret;
 }
 
+static bool gid_list_has(const gid_t *list, size_t size, gid_t val) {
+        for (size_t i = 0; i < size; i++)
+                if (list[i] == val)
+                        return true;
+        return false;
+}
+
 int in_gid(gid_t gid) {
-        long ngroups_max;
-        gid_t *gids;
-        int r, i;
+        _cleanup_free_ gid_t *gids = NULL;
+        int ngroups;
 
         if (getgid() == gid)
                 return 1;
@@ -408,20 +447,11 @@ int in_gid(gid_t gid) {
         if (!gid_is_valid(gid))
                 return -EINVAL;
 
-        ngroups_max = sysconf(_SC_NGROUPS_MAX);
-        assert(ngroups_max > 0);
+        ngroups = getgroups_alloc(&gids);
+        if (ngroups < 0)
+                return ngroups;
 
-        gids = newa(gid_t, ngroups_max);
-
-        r = getgroups(ngroups_max, gids);
-        if (r < 0)
-                return -errno;
-
-        for (i = 0; i < r; i++)
-                if (gids[i] == gid)
-                        return 1;
-
-        return 0;
+        return gid_list_has(gids, ngroups, gid);
 }
 
 int in_group(const char *name) {
@@ -435,6 +465,69 @@ int in_group(const char *name) {
         return in_gid(gid);
 }
 
+int merge_gid_lists(const gid_t *list1, size_t size1, const gid_t *list2, size_t size2, gid_t **ret) {
+        size_t nresult = 0;
+        assert(ret);
+
+        if (size2 > INT_MAX - size1)
+                return -ENOBUFS;
+
+        gid_t *buf = new(gid_t, size1 + size2);
+        if (!buf)
+                return -ENOMEM;
+
+        /* Duplicates need to be skipped on merging, otherwise they'll be passed on and stored in the kernel. */
+        for (size_t i = 0; i < size1; i++)
+                if (!gid_list_has(buf, nresult, list1[i]))
+                        buf[nresult++] = list1[i];
+        for (size_t i = 0; i < size2; i++)
+                if (!gid_list_has(buf, nresult, list2[i]))
+                        buf[nresult++] = list2[i];
+        *ret = buf;
+        return (int)nresult;
+}
+
+int getgroups_alloc(gid_t** gids) {
+        gid_t *allocated;
+        _cleanup_free_  gid_t *p = NULL;
+        int ngroups = 8;
+        unsigned attempt = 0;
+
+        allocated = new(gid_t, ngroups);
+        if (!allocated)
+                return -ENOMEM;
+        p = allocated;
+
+        for (;;) {
+                ngroups = getgroups(ngroups, p);
+                if (ngroups >= 0)
+                        break;
+                if (errno != EINVAL)
+                        return -errno;
+
+                /* Give up eventually */
+                if (attempt++ > 10)
+                        return -EINVAL;
+
+                /* Get actual size needed, and size the array explicitly. Note that this is potentially racy
+                 * to use (in multi-threaded programs), hence let's call this in a loop. */
+                ngroups = getgroups(0, NULL);
+                if (ngroups < 0)
+                        return -errno;
+                if (ngroups == 0)
+                        return false;
+
+                free(allocated);
+
+                p = allocated = new(gid_t, ngroups);
+                if (!allocated)
+                        return -ENOMEM;
+        }
+
+        *gids = TAKE_PTR(p);
+        return ngroups;
+}
+
 int get_home_dir(char **_h) {
         struct passwd *p;
         const char *e;
@@ -445,12 +538,12 @@ int get_home_dir(char **_h) {
 
         /* Take the user specified one */
         e = secure_getenv("HOME");
-        if (e && path_is_absolute(e)) {
+        if (e && path_is_valid(e) && path_is_absolute(e)) {
                 h = strdup(e);
                 if (!h)
                         return -ENOMEM;
 
-                *_h = h;
+                *_h = path_simplify(h, true);
                 return 0;
         }
 
@@ -478,16 +571,17 @@ int get_home_dir(char **_h) {
         errno = 0;
         p = getpwuid(u);
         if (!p)
-                return errno > 0 ? -errno : -ESRCH;
+                return errno_or_else(ESRCH);
 
-        if (!path_is_absolute(p->pw_dir))
+        if (!path_is_valid(p->pw_dir) ||
+            !path_is_absolute(p->pw_dir))
                 return -EINVAL;
 
         h = strdup(p->pw_dir);
         if (!h)
                 return -ENOMEM;
 
-        *_h = h;
+        *_h = path_simplify(h, true);
         return 0;
 }
 
@@ -500,13 +594,13 @@ int get_shell(char **_s) {
         assert(_s);
 
         /* Take the user specified one */
-        e = getenv("SHELL");
-        if (e) {
+        e = secure_getenv("SHELL");
+        if (e && path_is_valid(e) && path_is_absolute(e)) {
                 s = strdup(e);
                 if (!s)
                         return -ENOMEM;
 
-                *_s = s;
+                *_s = path_simplify(s, true);
                 return 0;
         }
 
@@ -522,7 +616,7 @@ int get_shell(char **_s) {
         }
         if (synthesize_nobody() &&
             u == UID_NOBODY) {
-                s = strdup("/sbin/nologin");
+                s = strdup(NOLOGIN);
                 if (!s)
                         return -ENOMEM;
 
@@ -534,16 +628,17 @@ int get_shell(char **_s) {
         errno = 0;
         p = getpwuid(u);
         if (!p)
-                return errno > 0 ? -errno : -ESRCH;
+                return errno_or_else(ESRCH);
 
-        if (!path_is_absolute(p->pw_shell))
+        if (!path_is_valid(p->pw_shell) ||
+            !path_is_absolute(p->pw_shell))
                 return -EINVAL;
 
         s = strdup(p->pw_shell);
         if (!s)
                 return -ENOMEM;
 
-        *_s = s;
+        *_s = path_simplify(s, true);
         return 0;
 }
 
@@ -603,16 +698,19 @@ int take_etc_passwd_lock(const char *root) {
         return fd;
 }
 
-bool valid_user_group_name(const char *u) {
+bool valid_user_group_name_full(const char *u, bool strict) {
         const char *i;
         long sz;
 
         /* Checks if the specified name is a valid user/group name. Also see POSIX IEEE Std 1003.1-2008, 2016 Edition,
          * 3.437. We are a bit stricter here however. Specifically we deviate from POSIX rules:
          *
-         * - We don't allow any dots (this would break chown syntax which permits dots as user/group name separator)
          * - We require that names fit into the appropriate utmp field
          * - We don't allow empty user names
+         * - No dots or digits in the first character
+         *
+         * If strict==true, additionally:
+         * - We don't allow any dots (this conflicts with chown syntax which permits dots as user/group name separator)
          *
          * Note that other systems are even more restrictive, and don't permit underscores or uppercase characters.
          */
@@ -625,12 +723,25 @@ bool valid_user_group_name(const char *u) {
             u[0] != '_')
                 return false;
 
+        bool warned = false;
+
         for (i = u+1; *i; i++) {
-                if (!(*i >= 'a' && *i <= 'z') &&
-                    !(*i >= 'A' && *i <= 'Z') &&
-                    !(*i >= '0' && *i <= '9') &&
-                    !IN_SET(*i, '_', '-'))
-                        return false;
+                if (((*i >= 'a' && *i <= 'z') ||
+                     (*i >= 'A' && *i <= 'Z') ||
+                     (*i >= '0' && *i <= '9') ||
+                     IN_SET(*i, '_', '-')))
+                        continue;
+
+                if (*i == '.' && !strict) {
+                        if (!warned) {
+                                log_warning("Bad user or group name \"%s\", accepting for compatibility.", u);
+                                warned = true;
+                        }
+
+                        continue;
+                }
+
+                return false;
         }
 
         sz = sysconf(_SC_LOGIN_NAME_MAX);
@@ -645,15 +756,15 @@ bool valid_user_group_name(const char *u) {
         return true;
 }
 
-bool valid_user_group_name_or_id(const char *u) {
+bool valid_user_group_name_or_id_full(const char *u, bool strict) {
 
-        /* Similar as above, but is also fine with numeric UID/GID specifications, as long as they are in the right
-         * range, and not the invalid user ids. */
+        /* Similar as above, but is also fine with numeric UID/GID specifications, as long as they are in the
+         * right range, and not the invalid user ids. */
 
         if (isempty(u))
                 return false;
 
-        if (valid_user_group_name(u))
+        if (valid_user_group_name_full(u, strict))
                 return true;
 
         return parse_uid(u, NULL) >= 0;
@@ -733,10 +844,6 @@ int maybe_setgroups(size_t size, const gid_t *list) {
 }
 
 bool synthesize_nobody(void) {
-
-#ifdef NOLEGACY
-        return true;
-#else
         /* Returns true when we shall synthesize the "nobody" user (which we do by default). This can be turned off by
          * touching /etc/systemd/dont-synthesize-nobody in order to provide upgrade compatibility with legacy systems
          * that used the "nobody" user name and group name for other UIDs/GIDs than 65534.
@@ -750,7 +857,6 @@ bool synthesize_nobody(void) {
                 cache = access("/etc/systemd/dont-synthesize-nobody", F_OK) < 0;
 
         return cache;
-#endif
 }
 
 int putpwent_sane(const struct passwd *pw, FILE *stream) {
@@ -759,7 +865,7 @@ int putpwent_sane(const struct passwd *pw, FILE *stream) {
 
         errno = 0;
         if (putpwent(pw, stream) != 0)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         return 0;
 }
@@ -770,7 +876,7 @@ int putspent_sane(const struct spwd *sp, FILE *stream) {
 
         errno = 0;
         if (putspent(sp, stream) != 0)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         return 0;
 }
@@ -781,7 +887,7 @@ int putgrent_sane(const struct group *gr, FILE *stream) {
 
         errno = 0;
         if (putgrent(gr, stream) != 0)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         return 0;
 }
@@ -793,7 +899,7 @@ int putsgent_sane(const struct sgrp *sg, FILE *stream) {
 
         errno = 0;
         if (putsgent(sg, stream) != 0)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         return 0;
 }
@@ -808,7 +914,7 @@ int fgetpwent_sane(FILE *stream, struct passwd **pw) {
         errno = 0;
         p = fgetpwent(stream);
         if (!p && errno != ENOENT)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         *pw = p;
         return !!p;
@@ -823,7 +929,7 @@ int fgetspent_sane(FILE *stream, struct spwd **sp) {
         errno = 0;
         s = fgetspent(stream);
         if (!s && errno != ENOENT)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         *sp = s;
         return !!s;
@@ -838,7 +944,7 @@ int fgetgrent_sane(FILE *stream, struct group **gr) {
         errno = 0;
         g = fgetgrent(stream);
         if (!g && errno != ENOENT)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         *gr = g;
         return !!g;
@@ -854,7 +960,7 @@ int fgetsgent_sane(FILE *stream, struct sgrp **sg) {
         errno = 0;
         s = fgetsgent(stream);
         if (!s && errno != ENOENT)
-                return errno > 0 ? -errno : -EIO;
+                return errno_or_else(EIO);
 
         *sg = s;
         return !!s;

@@ -2,36 +2,41 @@
 #pragma once
 
 #include <assert.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <sys/param.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 
-#define _printf_(a, b) __attribute__ ((format (printf, a, b)))
+#define _printf_(a, b) __attribute__((__format__(printf, a, b)))
 #ifdef __clang__
 #  define _alloc_(...)
 #else
-#  define _alloc_(...) __attribute__ ((alloc_size(__VA_ARGS__)))
+#  define _alloc_(...) __attribute__((__alloc_size__(__VA_ARGS__)))
 #endif
-#define _sentinel_ __attribute__ ((sentinel))
-#define _unused_ __attribute__ ((unused))
-#define _destructor_ __attribute__ ((destructor))
-#define _pure_ __attribute__ ((pure))
-#define _const_ __attribute__ ((const))
-#define _deprecated_ __attribute__ ((deprecated))
-#define _packed_ __attribute__ ((packed))
-#define _malloc_ __attribute__ ((malloc))
-#define _weak_ __attribute__ ((weak))
+#define _sentinel_ __attribute__((__sentinel__))
+#define _section_(x) __attribute__((__section__(x)))
+#define _used_ __attribute__((__used__))
+#define _unused_ __attribute__((__unused__))
+#define _destructor_ __attribute__((__destructor__))
+#define _pure_ __attribute__((__pure__))
+#define _const_ __attribute__((__const__))
+#define _deprecated_ __attribute__((__deprecated__))
+#define _packed_ __attribute__((__packed__))
+#define _malloc_ __attribute__((__malloc__))
+#define _weak_ __attribute__((__weak__))
 #define _likely_(x) (__builtin_expect(!!(x), 1))
 #define _unlikely_(x) (__builtin_expect(!!(x), 0))
-#define _public_ __attribute__ ((visibility("default")))
-#define _hidden_ __attribute__ ((visibility("hidden")))
-#define _weakref_(x) __attribute__((weakref(#x)))
-#define _alignas_(x) __attribute__((aligned(__alignof(x))))
-#define _cleanup_(x) __attribute__((cleanup(x)))
+#define _public_ __attribute__((__visibility__("default")))
+#define _hidden_ __attribute__((__visibility__("hidden")))
+#define _weakref_(x) __attribute__((__weakref__(#x)))
+#define _align_(x) __attribute__((__aligned__(x)))
+#define _alignas_(x) __attribute__((__aligned__(__alignof(x))))
+#define _alignptr_ __attribute__((__aligned__(sizeof(void*))))
+#define _cleanup_(x) __attribute__((__cleanup__(x)))
 #if __GNUC__ >= 7
-#define _fallthrough_ __attribute__((fallthrough))
+#define _fallthrough_ __attribute__((__fallthrough__))
 #else
 #define _fallthrough_
 #endif
@@ -41,7 +46,7 @@
 #if __STDC_VERSION__ >= 201112L
 #define _noreturn_ _Noreturn
 #else
-#define _noreturn_ __attribute__((noreturn))
+#define _noreturn_ __attribute__((__noreturn__))
 #endif
 #endif
 
@@ -54,6 +59,29 @@
 #  if !defined(HAS_FEATURE_MEMORY_SANITIZER)
 #    define HAS_FEATURE_MEMORY_SANITIZER 0
 #  endif
+#endif
+
+#if !defined(HAS_FEATURE_ADDRESS_SANITIZER)
+#  ifdef __SANITIZE_ADDRESS__
+#      define HAS_FEATURE_ADDRESS_SANITIZER 1
+#  elif defined(__has_feature)
+#    if __has_feature(address_sanitizer)
+#      define HAS_FEATURE_ADDRESS_SANITIZER 1
+#    endif
+#  endif
+#  if !defined(HAS_FEATURE_ADDRESS_SANITIZER)
+#    define HAS_FEATURE_ADDRESS_SANITIZER 0
+#  endif
+#endif
+
+/* Note: on GCC "no_sanitize_address" is a function attribute only, on llvm it may also be applied to global
+ * variables. We define a specific macro which knows this. Note that on GCC we don't need this decorator so much, since
+ * our primary usecase for this attribute is registration structures placed in named ELF sections which shall not be
+ * padded, but GCC doesn't pad those anyway if AddressSanitizer is enabled. */
+#if HAS_FEATURE_ADDRESS_SANITIZER && defined(__clang__)
+#define _variable_no_sanitize_address_ __attribute__((__no_sanitize_address__))
+#else
+#define _variable_no_sanitize_address_
 #endif
 
 /* Temporarily disable some warnings */
@@ -76,6 +104,15 @@
 #define DISABLE_WARNING_INCOMPATIBLE_POINTER_TYPES                      \
         _Pragma("GCC diagnostic push");                                 \
         _Pragma("GCC diagnostic ignored \"-Wincompatible-pointer-types\"")
+
+#if HAVE_WSTRINGOP_TRUNCATION
+#  define DISABLE_WARNING_STRINGOP_TRUNCATION                           \
+        _Pragma("GCC diagnostic push");                                 \
+        _Pragma("GCC diagnostic ignored \"-Wstringop-truncation\"")
+#else
+#  define DISABLE_WARNING_STRINGOP_TRUNCATION                           \
+        _Pragma("GCC diagnostic push")
+#endif
 
 #define REENABLE_WARNING                                                \
         _Pragma("GCC diagnostic pop")
@@ -126,6 +163,11 @@ static inline size_t ALIGN_TO(size_t l, size_t ali) {
 
 /* align to next higher power-of-2 (except for: 0 => 0, overflow => 0) */
 static inline unsigned long ALIGN_POWER2(unsigned long u) {
+
+        /* Avoid subtraction overflow */
+        if (u == 0)
+                return 0;
+
         /* clz(0) is undefined */
         if (u == 1)
                 return 1;
@@ -135,6 +177,29 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
                 return 0;
 
         return 1UL << (sizeof(u) * 8 - __builtin_clzl(u - 1UL));
+}
+
+static inline size_t GREEDY_ALLOC_ROUND_UP(size_t l) {
+        size_t m;
+
+        /* Round up allocation sizes a bit to some reasonable, likely larger value. This is supposed to be
+         * used for cases which are likely called in an allocation loop of some form, i.e. that repetitively
+         * grow stuff, for example strv_extend() and suchlike.
+         *
+         * Note the difference to GREEDY_REALLOC() here, as this helper operates on a single size value only,
+         * and rounds up to next multiple of 2, needing no further counter.
+         *
+         * Note the benefits of direct ALIGN_POWER2() usage: type-safety for size_t, sane handling for very
+         * small (i.e. <= 2) and safe handling for very large (i.e. > SSIZE_MAX) values. */
+
+        if (l <= 2)
+                return 2; /* Never allocate less than 2 of something.  */
+
+        m = ALIGN_POWER2(l);
+        if (m == 0) /* overflow? */
+                return l;
+
+        return m;
 }
 
 #ifndef __COVERITY__
@@ -246,11 +311,12 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
  * computation should be possible in the given type. Therefore, we use
  * [x / y + !!(x % y)]. Note that on "Real CPUs" a division returns both the
  * quotient and the remainder, so both should be equally fast. */
-#define DIV_ROUND_UP(_x, _y)                                            \
+#define DIV_ROUND_UP(x, y) __DIV_ROUND_UP(UNIQ, (x), UNIQ, (y))
+#define __DIV_ROUND_UP(xq, x, yq, y)                                    \
         ({                                                              \
-                const typeof(_x) __x = (_x);                            \
-                const typeof(_y) __y = (_y);                            \
-                (__x / __y + !!(__x % __y));                            \
+                const typeof(x) UNIQ_T(X, xq) = (x);                    \
+                const typeof(y) UNIQ_T(Y, yq) = (y);                    \
+                (UNIQ_T(X, xq) / UNIQ_T(Y, yq) + !!(UNIQ_T(X, xq) % UNIQ_T(Y, yq))); \
         })
 
 #ifdef __COVERITY__
@@ -269,29 +335,30 @@ static inline unsigned long ALIGN_POWER2(unsigned long u) {
 
 extern void __coverity_panic__(void);
 
-static inline int __coverity_check__(int condition) {
+static inline void __coverity_check__(int condition) {
+        if (!condition)
+                __coverity_panic__();
+}
+
+static inline int __coverity_check_and_return__(int condition) {
         return condition;
 }
 
-#define assert_message_se(expr, message)                                \
-        do {                                                            \
-                if (__coverity_check__(!(expr)))                        \
-                        __coverity_panic__();                           \
-        } while (false)
+#define assert_message_se(expr, message) __coverity_check__(!!(expr))
 
-#define assert_log(expr, message) __coverity_check__(!!(expr))
+#define assert_log(expr, message) __coverity_check_and_return__(!!(expr))
 
 #else  /* ! __COVERITY__ */
 
 #define assert_message_se(expr, message)                                \
         do {                                                            \
                 if (_unlikely_(!(expr)))                                \
-                        log_assert_failed(message, __FILE__, __LINE__, __PRETTY_FUNCTION__); \
+                        log_assert_failed(message, PROJECT_FILE, __LINE__, __PRETTY_FUNCTION__); \
         } while (false)
 
 #define assert_log(expr, message) ((_likely_(expr))                     \
         ? (true)                                                        \
-        : (log_assert_failed_return(message, __FILE__, __LINE__, __PRETTY_FUNCTION__), false))
+        : (log_assert_failed_return(message, PROJECT_FILE, __LINE__, __PRETTY_FUNCTION__), false))
 
 #endif  /* __COVERITY__ */
 
@@ -306,18 +373,16 @@ static inline int __coverity_check__(int condition) {
 #endif
 
 #define assert_not_reached(t)                                           \
-        do {                                                            \
-                log_assert_failed_unreachable(t, __FILE__, __LINE__, __PRETTY_FUNCTION__); \
-        } while (false)
+        log_assert_failed_unreachable(t, PROJECT_FILE, __LINE__, __PRETTY_FUNCTION__)
 
 #if defined(static_assert)
 #define assert_cc(expr)                                                 \
-        static_assert(expr, #expr);
+        static_assert(expr, #expr)
 #else
 #define assert_cc(expr)                                                 \
         struct CONCATENATE(_assert_struct_, __COUNTER__) {              \
                 char x[(expr) ? 0 : -1];                                \
-        };
+        }
 #endif
 
 #define assert_return(expr, r)                                          \
@@ -332,6 +397,12 @@ static inline int __coverity_check__(int condition) {
                         errno = err;                                    \
                         return (r);                                     \
                 }                                                       \
+        } while (false)
+
+#define return_with_errno(r, err)                     \
+        do {                                          \
+                errno = abs(err);                     \
+                return r;                             \
         } while (false)
 
 #define PTR_TO_INT(p) ((int) ((intptr_t) (p)))
@@ -383,7 +454,7 @@ static inline int __coverity_check__(int condition) {
 #define SET_FLAG(v, flag, b) \
         (v) = (b) ? ((v) | (flag)) : ((v) & ~(flag))
 #define FLAGS_SET(v, flags) \
-        (((v) & (flags)) == (flags))
+        ((~(v) & (flags)) == 0)
 
 #define CASE_F(X) case X:
 #define CASE_F_1(CASE, X) CASE_F(X)
@@ -420,7 +491,8 @@ static inline int __coverity_check__(int condition) {
                  * type for the array, in the hope that checkers such as ubsan don't complain that the initializers for \
                  * the array are not representable by the base type. Ideally we'd use typeof(x) as base type, but that  \
                  * doesn't work, as we want to use this on bitfields and gcc refuses typeof() on bitfields.) */         \
-                assert_cc((sizeof((long double[]){__VA_ARGS__})/sizeof(long double)) <= 20); \
+                static const long double __assert_in_set[] _unused_ = { __VA_ARGS__ }; \
+                assert_cc(ELEMENTSOF(__assert_in_set) <= 20); \
                 switch(x) {                     \
                 FOR_EACH_MAKE_CASE(__VA_ARGS__) \
                         _found = true;          \
@@ -450,6 +522,11 @@ static inline int __coverity_check__(int condition) {
 #define thread_local __thread
 #endif
 #endif
+
+#define DEFINE_TRIVIAL_DESTRUCTOR(name, type, func)             \
+        static inline void name(type *p) {                      \
+                func(p);                                        \
+        }
 
 #define DEFINE_TRIVIAL_CLEANUP_FUNC(type, func)                 \
         static inline void func##p(type *p) {                   \

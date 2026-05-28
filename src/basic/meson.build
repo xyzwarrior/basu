@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: LGPL-2.1+
 
 basic_sources = files('''
+        MurmurHash2.c
+        MurmurHash2.h
+        af-list.c
+        af-list.h
         alloc-util.c
         alloc-util.h
         architecture.c
         architecture.h
+        arphrd-list.c
+        arphrd-list.h
+        async.c
+        async.h
         audit-util.c
         audit-util.h
-        blkid-util.h
         blockdev-util.c
         blockdev-util.h
-        btrfs-ctree.h
         btrfs-util.c
         btrfs-util.h
         build.h
@@ -28,25 +34,29 @@ basic_sources = files('''
         conf-files.h
         copy.c
         copy.h
-        crypt-util.c
-        crypt-util.h
         def.h
         device-nodes.c
         device-nodes.h
         dirent-util.c
         dirent-util.h
+        env-file.c
+        env-file.h
         env-util.c
         env-util.h
         errno-list.c
         errno-list.h
+        errno-util.h
         escape.c
         escape.h
+        ether-addr-util.c
+        ether-addr-util.h
         extract-word.c
         extract-word.h
         fd-util.c
         fd-util.h
         fileio.c
         fileio.h
+        format-util.c
         format-util.h
         fs-util.c
         fs-util.h
@@ -62,16 +72,40 @@ basic_sources = files('''
         hexdecoct.h
         hostname-util.c
         hostname-util.h
+        in-addr-util.c
+        in-addr-util.h
         io-util.c
         io-util.h
         ioprio.h
-        json-internal.h
-        json.c
-        json.h
         khash.c
         khash.h
         label.c
         label.h
+        limits-util.c
+        limits-util.h
+        linux/btrfs.h
+        linux/btrfs_tree.h
+        linux/can/vxcan.h
+        linux/fib_rules.h
+        linux/fou.h
+        linux/if.h
+        linux/if_addr.h
+        linux/if_arp.h
+        linux/if_bonding.h
+        linux/if_bridge.h
+        linux/if_ether.h
+        linux/if_link.h
+        linux/if_macsec.h
+        linux/if_tun.h
+        linux/if_tunnel.h
+        linux/in.h
+        linux/in6.h
+        linux/l2tp.h
+        linux/libc-compat.h
+        linux/netdevice.h
+        linux/netlink.h
+        linux/rtnetlink.h
+        linux/wireguard.h
         list.h
         locale-util.c
         locale-util.h
@@ -82,17 +116,45 @@ basic_sources = files('''
         macro.h
         memfd-util.c
         memfd-util.h
+        memory-util.c
+        memory-util.h
         mempool.c
         mempool.h
+        missing_audit.h
+        missing_capability.h
+        missing_drm.h
+        missing_fcntl.h
+        missing_fs.h
+        missing_input.h
+        missing_keyctl.h
+        missing_magic.h
+        missing_mman.h
+        missing_network.h
+        missing_prctl.h
+        missing_random.h
+        missing_resource.h
+        missing_sched.h
+        missing_securebits.h
+        missing_socket.h
+        missing_stat.h
+        missing_stdlib.h
         missing_syscall.h
+        missing_timerfd.h
+        missing_type.h
         mkdir-label.c
         mkdir.c
         mkdir.h
-        mount-util.c
-        mount-util.h
+        mountpoint-util.c
+        mountpoint-util.h
+        namespace-util.c
+        namespace-util.h
         nss-util.h
-        pager.c
-        pager.h
+        nulstr-util.c
+        nulstr-util.h
+        ordered-set.c
+        ordered-set.h
+	parse-printf-format.c
+	parse-printf-format.h
         parse-util.c
         parse-util.h
         path-util.c
@@ -105,19 +167,25 @@ basic_sources = files('''
         process-util.h
         procfs-util.c
         procfs-util.h
+        quota-util.c
+        quota-util.h
         random-util.c
         random-util.h
+        ratelimit.c
+        ratelimit.h
         raw-clone.h
         raw-reboot.h
-        refcnt.h
+        replace-var.c
+        replace-var.h
         rlimit-util.c
         rlimit-util.h
         rm-rf.c
         rm-rf.h
-        securebits.h
         selinux-util.c
         selinux-util.h
         set.h
+        sigbus.c
+        sigbus.h
         signal-util.c
         signal-util.h
         siphash24.c
@@ -127,23 +195,32 @@ basic_sources = files('''
         socket-label.c
         socket-util.c
         socket-util.h
+        sort-util.c
+        sort-util.h
         sparse-endian.h
         special.h
         stat-util.c
         stat-util.h
+        static-destruct.h
         stdio-util.h
+        strbuf.c
+        strbuf.h
         string-table.c
         string-table.h
         string-util.c
         string-util.h
         strv.c
         strv.h
+        strxcpyx.c
+        strxcpyx.h
         syslog-util.c
         syslog-util.h
         terminal-util.c
         terminal-util.h
         time-util.c
         time-util.h
+        tmpfile-util.c
+        tmpfile-util.h
         umask-util.h
         unaligned.h
         unit-def.c
@@ -156,39 +233,35 @@ basic_sources = files('''
         utf8.h
         util.c
         util.h
-        verbs.c
-        verbs.h
         virt.c
         virt.h
         xattr-util.c
         xattr-util.h
-        xml.c
-        xml.h
 '''.split())
 
-missing_h = files('missing.h')
-
-generate_gperfs = find_program('generate-gperfs.py')
+missing_audit_h = files('missing_audit.h')
+missing_capability_h = files('missing_capability.h')
+missing_socket_h = files('missing_socket.h')
 
 generate_af_list = find_program('generate-af-list.sh')
 af_list_txt = custom_target(
         'af-list.txt',
         output : 'af-list.txt',
-        command : [generate_af_list, cpp],
+        command : [generate_af_list, cpp, config_h, missing_socket_h],
         capture : true)
 
 generate_arphrd_list = find_program('generate-arphrd-list.sh')
 arphrd_list_txt = custom_target(
         'arphrd-list.txt',
         output : 'arphrd-list.txt',
-        command : [generate_arphrd_list, cpp],
+        command : [generate_arphrd_list, cpp, config_h],
         capture : true)
 
 generate_cap_list = find_program('generate-cap-list.sh')
 cap_list_txt = custom_target(
         'cap-list.txt',
         output : 'cap-list.txt',
-        command : [generate_cap_list, cpp, config_h, missing_h],
+        command : [generate_cap_list, cpp, config_h, missing_capability_h],
         capture : true)
 
 generate_errno_list = find_program('generate-errno-list.sh')
@@ -198,19 +271,11 @@ errno_list_txt = custom_target(
         command : [generate_errno_list, cpp],
         capture : true)
 
-generate_socket_protocol_list = find_program('generate-socket-protocol-list.sh')
-socket_protocol_list_txt = custom_target(
-        'socket-protocol-list.txt',
-        output : 'socket-protocol-list.txt',
-        command : [generate_socket_protocol_list, cpp],
-        capture : true)
-
 generated_gperf_headers = []
 foreach item : [['af',     af_list_txt,     'af',         ''],
                 ['arphrd', arphrd_list_txt, 'arphrd',     'ARPHRD_'],
                 ['cap',    cap_list_txt,    'capability', ''],
-                ['errno',  errno_list_txt,  'errno',      ''],
-                ['socket-protocol', socket_protocol_list_txt, 'socket_protocol',     'IPPROTO_']]
+                ['errno',  errno_list_txt,  'errno',      '']]
 
         fname = '@0@-from-name.gperf'.format(item[0])
         gperf_file = custom_target(
@@ -245,17 +310,28 @@ foreach item : [['af',     af_list_txt,     'af',         ''],
         generated_gperf_headers += [target1, target2]
 endforeach
 
-basic_sources += [missing_h] + generated_gperf_headers
+basic_sources += generated_gperf_headers
+basic_gcrypt_sources = files(
+        'gcrypt-util.c',
+        'gcrypt-util.h')
 
 libbasic = static_library(
         'basic',
         basic_sources,
         include_directories : includes,
-        dependencies : [threads,
+        dependencies : [versiondep,
+                        threads,
                         libcap,
-                        libblkid,
-                        libmount,
                         libselinux,
                         libm],
         c_args : ['-fvisibility=default'],
         install : false)
+
+# A convenience library that is separate from libbasic to avoid
+# unnecessary linking to libgcrypt.
+libbasic_gcrypt = static_library(
+        'basic-gcrypt',
+        basic_gcrypt_sources,
+        include_directories : includes,
+        dependencies : [libgcrypt],
+        c_args : ['-fvisibility=default'])

@@ -6,8 +6,16 @@ id128_sources = files('''
         sd-id128/sd-id128.c
 '''.split())
 
-sd_daemon_c = files('sd-daemon/sd-daemon.c')
-sd_event_c = files('sd-event/sd-event.c')
+sd_daemon_sources = files('sd-daemon/sd-daemon.c')
+
+sd_event_sources = files('''
+        sd-event/event-source.h
+        sd-event/event-util.c
+        sd-event/event-util.h
+        sd-event/sd-event.c
+'''.split())
+
+sd_login_sources = files('sd-login/sd-login.c')
 
 libsystemd_sources = files('''
         sd-bus/bus-common-errors.c
@@ -49,7 +57,36 @@ libsystemd_sources = files('''
         sd-bus/bus-type.c
         sd-bus/bus-type.h
         sd-bus/sd-bus.c
-'''.split()) + id128_sources + sd_daemon_c + sd_event_c
+        sd-device/device-enumerator-private.h
+        sd-device/device-enumerator.c
+        sd-device/device-internal.h
+        sd-device/device-monitor-private.h
+        sd-device/device-monitor.c
+        sd-device/device-private.c
+        sd-device/device-private.h
+        sd-device/device-util.h
+        sd-device/sd-device.c
+        sd-netlink/generic-netlink.c
+        sd-netlink/generic-netlink.h
+        sd-netlink/netlink-internal.h
+        sd-netlink/netlink-message.c
+        sd-netlink/netlink-slot.c
+        sd-netlink/netlink-slot.h
+        sd-netlink/netlink-socket.c
+        sd-netlink/netlink-types.c
+        sd-netlink/netlink-types.h
+        sd-netlink/netlink-util.c
+        sd-netlink/netlink-util.h
+        sd-netlink/rtnl-message.c
+        sd-netlink/sd-netlink.c
+        sd-network/network-util.c
+        sd-network/network-util.h
+        sd-network/sd-network.c
+        sd-path/sd-path.c
+        sd-resolve/resolve-private.h
+        sd-resolve/sd-resolve.c
+        sd-utf8/sd-utf8.c
+'''.split()) + id128_sources + sd_daemon_sources + sd_event_sources + sd_login_sources
 
 disable_mempool_c = files('disable-mempool.c')
 
@@ -67,9 +104,8 @@ libsystemd_static = static_library(
 
 libsystemd_sym = 'src/libsystemd/libsystemd.sym'
 
-libsystemd_pc = configure_file(
-        input : 'libbasu.pc.in',
-        output : 'libbasu.pc',
-        configuration : substs)
-install_data(libsystemd_pc,
-             install_dir : pkgconfiglibdir)
+configure_file(
+        input : 'libsystemd.pc.in',
+        output : 'libsystemd.pc',
+        configuration : substs,
+        install_dir : pkgconfiglibdir == 'no' ? '' : pkgconfiglibdir)

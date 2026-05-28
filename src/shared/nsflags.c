@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <sched.h>
+#include <errno.h>
 
 #include "alloc-util.h"
 #include "extract-word.h"
@@ -62,12 +62,6 @@ int namespace_flags_to_string(unsigned long flags, char **ret) {
                         continue;
 
                 if (!strextend_with_separator(&s, " ", namespace_flag_map[i].name, NULL))
-                        return -ENOMEM;
-        }
-
-        if (!s) {
-                s = strdup("");
-                if (!s)
                         return -ENOMEM;
         }
 

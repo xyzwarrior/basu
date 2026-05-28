@@ -5,13 +5,13 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 #include "sd-bus.h"
 
 #include "alloc-util.h"
 #include "bus-error.h"
 #include "errno-list.h"
+#include "errno-util.h"
 #include "string-util.h"
 #include "util.h"
 
@@ -54,8 +54,8 @@ BUS_ERROR_MAP_ELF_REGISTER const sd_bus_error_map bus_standard_errors[] = {
 };
 
 /* GCC maps this magically to the beginning and end of the BUS_ERROR_MAP section */
-extern const sd_bus_error_map __start_BUS_ERROR_MAP[];
-extern const sd_bus_error_map __stop_BUS_ERROR_MAP[];
+extern const sd_bus_error_map __start_SYSTEMD_BUS_ERROR_MAP[];
+extern const sd_bus_error_map __stop_SYSTEMD_BUS_ERROR_MAP[];
 
 /* Additional maps registered with sd_bus_error_add_map() are in this
  * NULL terminated array */
@@ -89,9 +89,8 @@ static int bus_error_name_to_errno(const char *name) {
                                         return m->code;
                         }
 
-        m = __start_BUS_ERROR_MAP;
-#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-        while (m < __stop_BUS_ERROR_MAP) {
+        m = ALIGN_TO_PTR(__start_SYSTEMD_BUS_ERROR_MAP, sizeof(void*));
+        while (m < __stop_SYSTEMD_BUS_ERROR_MAP) {
                 /* For magic ELF error maps, the end marker might
                  * appear in the middle of things, since multiple maps
                  * might appear in the same section. Hence, let's skip
@@ -99,7 +98,7 @@ static int bus_error_name_to_errno(const char *name) {
                  * boundary, which is the selected alignment for the
                  * arrays. */
                 if (m->code == BUS_ERROR_MAP_END_MARKER) {
-                        m = ALIGN8_PTR(m+1);
+                        m = ALIGN_TO_PTR(m + 1, sizeof(void*));
                         continue;
                 }
 
@@ -108,7 +107,6 @@ static int bus_error_name_to_errno(const char *name) {
 
                 m++;
         }
-#endif
 
         return EIO;
 }
@@ -181,7 +179,7 @@ static int errno_to_bus_error_name_new(int error, char **ret) {
         if (!name)
                 return 0;
 
-        n = strappend("System.Error.", name);
+        n = strjoin("System.Error.", name);
         if (!n)
                 return -ENOMEM;
 
@@ -205,8 +203,7 @@ _public_ void sd_bus_error_free(sd_bus_error *e) {
                 free((void*) e->message);
         }
 
-        e->name = e->message = NULL;
-        e->_need_free = 0;
+        *e = SD_BUS_ERROR_NULL;
 }
 
 _public_ int sd_bus_error_set(sd_bus_error *e, const char *name, const char *message) {
@@ -579,7 +576,7 @@ const char *bus_error_message(const sd_bus_error *e, int error) {
         if (error < 0)
                 error = -error;
 
-        return strerror(error);
+        return strerror_safe(error);
 }
 
 static bool map_ok(const sd_bus_error_map *map) {

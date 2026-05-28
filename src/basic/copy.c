@@ -1,16 +1,12 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/sendfile.h>
-#include <sys/stat.h>
 #include <sys/xattr.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "alloc-util.h"
@@ -19,15 +15,18 @@
 #include "copy.h"
 #include "dirent-util.h"
 #include "fd-util.h"
-#include "fileio.h"
 #include "fs-util.h"
 #include "io-util.h"
 #include "macro.h"
-#include "missing.h"
-#include "mount-util.h"
+#include "missing_syscall.h"
+#include "mountpoint-util.h"
+#include "nulstr-util.h"
+#include "selinux-util.h"
+#include "stat-util.h"
 #include "string-util.h"
 #include "strv.h"
 #include "time-util.h"
+#include "tmpfile-util.h"
 #include "umask-util.h"
 #include "user-util.h"
 #include "xattr-util.h"
@@ -85,12 +84,30 @@ static int fd_is_nonblock_pipe(int fd) {
         return FLAGS_SET(flags, O_NONBLOCK) ? FD_IS_NONBLOCKING_PIPE : FD_IS_BLOCKING_PIPE;
 }
 
+static int sigint_pending(void) {
+        sigset_t ss;
+
+        assert_se(sigemptyset(&ss) >= 0);
+        assert_se(sigaddset(&ss, SIGINT) >= 0);
+
+        if (sigtimedwait(&ss, NULL, &(struct timespec) { 0, 0 }) < 0) {
+                if (errno == EAGAIN)
+                        return false;
+
+                return -errno;
+        }
+
+        return true;
+}
+
 int copy_bytes_full(
                 int fdf, int fdt,
                 uint64_t max_bytes,
                 CopyFlags copy_flags,
                 void **ret_remains,
-                size_t *ret_remains_size) {
+                size_t *ret_remains_size,
+                copy_progress_bytes_t progress,
+                void *userdata) {
 
         bool try_cfr = true, try_sendfile = true, try_splice = true;
         int r, nonblock_pipe = -1;
@@ -161,8 +178,6 @@ int copy_bytes_full(
                                                 return 1; /* we copied only some number of bytes, which worked, but this means we didn't hit EOF, return 1 */
                                         }
                                 }
-
-                                log_debug_errno(r, "Reflinking didn't work, falling back to non-reflink copying: %m");
                         }
                 }
         }
@@ -172,6 +187,14 @@ int copy_bytes_full(
 
                 if (max_bytes <= 0)
                         return 1; /* return > 0 if we hit the max_bytes limit */
+
+                if (FLAGS_SET(copy_flags, COPY_SIGINT)) {
+                        r = sigint_pending();
+                        if (r < 0)
+                                return r;
+                        if (r > 0)
+                                return -EINTR;
+                }
 
                 if (max_bytes != UINT64_MAX && m > max_bytes)
                         m = max_bytes;
@@ -308,10 +331,17 @@ int copy_bytes_full(
                 }
 
         next:
+                if (progress) {
+                        r = progress(n, userdata);
+                        if (r < 0)
+                                return r;
+                }
+
                 if (max_bytes != (uint64_t) -1) {
                         assert(max_bytes >= (uint64_t) n);
                         max_bytes -= n;
                 }
+
                 /* sendfile accepts at most SSIZE_MAX-offset bytes to copy,
                  * so reduce our maximum by the amount we already copied,
                  * but don't go below our copy buffer size, unless we are
@@ -343,7 +373,15 @@ static int fd_copy_symlink(
         if (r < 0)
                 return r;
 
-        if (symlinkat(target, dt, to) < 0)
+        if (copy_flags & COPY_MAC_CREATE) {
+                r = mac_selinux_create_file_prepare_at(dt, to, S_IFLNK);
+                if (r < 0)
+                        return r;
+        }
+        r = symlinkat(target, dt, to);
+        if (copy_flags & COPY_MAC_CREATE)
+                mac_selinux_create_file_clear();
+        if (r < 0)
                 return -errno;
 
         if (fchownat(dt, to,
@@ -363,7 +401,9 @@ static int fd_copy_regular(
                 const char *to,
                 uid_t override_uid,
                 gid_t override_gid,
-                CopyFlags copy_flags) {
+                CopyFlags copy_flags,
+                copy_progress_bytes_t progress,
+                void *userdata) {
 
         _cleanup_close_ int fdf = -1, fdt = -1;
         struct timespec ts[2];
@@ -377,11 +417,18 @@ static int fd_copy_regular(
         if (fdf < 0)
                 return -errno;
 
+        if (copy_flags & COPY_MAC_CREATE) {
+                r = mac_selinux_create_file_prepare_at(dt, to, S_IFREG);
+                if (r < 0)
+                        return r;
+        }
         fdt = openat(dt, to, O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOCTTY|O_NOFOLLOW, st->st_mode & 07777);
+        if (copy_flags & COPY_MAC_CREATE)
+                mac_selinux_create_file_clear();
         if (fdt < 0)
                 return -errno;
 
-        r = copy_bytes(fdf, fdt, (uint64_t) -1, copy_flags);
+        r = copy_bytes_full(fdf, fdt, (uint64_t) -1, copy_flags, NULL, NULL, progress, userdata);
         if (r < 0) {
                 (void) unlinkat(dt, to, 0);
                 return r;
@@ -426,7 +473,14 @@ static int fd_copy_fifo(
         assert(st);
         assert(to);
 
+        if (copy_flags & COPY_MAC_CREATE) {
+                r = mac_selinux_create_file_prepare_at(dt, to, S_IFIFO);
+                if (r < 0)
+                        return r;
+        }
         r = mkfifoat(dt, to, st->st_mode & 07777);
+        if (copy_flags & COPY_MAC_CREATE)
+                mac_selinux_create_file_clear();
         if (r < 0)
                 return -errno;
 
@@ -457,7 +511,14 @@ static int fd_copy_node(
         assert(st);
         assert(to);
 
+        if (copy_flags & COPY_MAC_CREATE) {
+                r = mac_selinux_create_file_prepare_at(dt, to, st->st_mode & S_IFMT);
+                if (r < 0)
+                        return r;
+        }
         r = mknodat(dt, to, st->st_mode, st->st_rdev);
+        if (copy_flags & COPY_MAC_CREATE)
+                mac_selinux_create_file_clear();
         if (r < 0)
                 return -errno;
 
@@ -483,12 +544,16 @@ static int fd_copy_directory(
                 unsigned depth_left,
                 uid_t override_uid,
                 gid_t override_gid,
-                CopyFlags copy_flags) {
+                CopyFlags copy_flags,
+                const char *display_path,
+                copy_progress_path_t progress_path,
+                copy_progress_bytes_t progress_bytes,
+                void *userdata) {
 
         _cleanup_close_ int fdf = -1, fdt = -1;
         _cleanup_closedir_ DIR *d = NULL;
         struct dirent *de;
-        bool created;
+        bool exists, created;
         int r;
 
         assert(st);
@@ -509,13 +574,29 @@ static int fd_copy_directory(
                 return -errno;
         fdf = -1;
 
-        r = mkdirat(dt, to, st->st_mode & 07777);
-        if (r >= 0)
-                created = true;
-        else if (errno == EEXIST && (copy_flags & COPY_MERGE))
+        exists = false;
+        if (copy_flags & COPY_MERGE_EMPTY) {
+                r = dir_is_empty_at(dt, to);
+                if (r < 0 && r != -ENOENT)
+                        return r;
+                else if (r == 1)
+                        exists = true;
+        }
+
+        if (exists)
                 created = false;
-        else
-                return -errno;
+        else {
+                if (copy_flags & COPY_MAC_CREATE)
+                        r = mkdirat_label(dt, to, st->st_mode & 07777);
+                else
+                        r = mkdirat(dt, to, st->st_mode & 07777);
+                if (r >= 0)
+                        created = true;
+                else if (errno == EEXIST && (copy_flags & COPY_MERGE))
+                        created = false;
+                else
+                        return -errno;
+        }
 
         fdt = openat(dt, to, O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOCTTY|O_NOFOLLOW);
         if (fdt < 0)
@@ -524,15 +605,36 @@ static int fd_copy_directory(
         r = 0;
 
         FOREACH_DIRENT_ALL(de, d, return -errno) {
+                const char *child_display_path = NULL;
+                _cleanup_free_ char *dp = NULL;
                 struct stat buf;
                 int q;
 
                 if (dot_or_dot_dot(de->d_name))
                         continue;
 
+                if (FLAGS_SET(copy_flags, COPY_SIGINT)) {
+                        r = sigint_pending();
+                        if (r < 0)
+                                return r;
+                        if (r > 0)
+                                return -EINTR;
+                }
+
                 if (fstatat(dirfd(d), de->d_name, &buf, AT_SYMLINK_NOFOLLOW) < 0) {
                         r = -errno;
                         continue;
+                }
+
+                if (progress_path) {
+                        if (display_path)
+                                child_display_path = dp = path_join(display_path, de->d_name);
+                        else
+                                child_display_path = de->d_name;
+
+                        r = progress_path(child_display_path, &buf, userdata);
+                        if (r < 0)
+                                return r;
                 }
 
                 if (S_ISDIR(buf.st_mode)) {
@@ -566,9 +668,9 @@ static int fd_copy_directory(
                                         continue;
                         }
 
-                        q = fd_copy_directory(dirfd(d), de->d_name, &buf, fdt, de->d_name, original_device, depth_left-1, override_uid, override_gid, copy_flags);
+                        q = fd_copy_directory(dirfd(d), de->d_name, &buf, fdt, de->d_name, original_device, depth_left-1, override_uid, override_gid, copy_flags, child_display_path, progress_path, progress_bytes, userdata);
                 } else if (S_ISREG(buf.st_mode))
-                        q = fd_copy_regular(dirfd(d), de->d_name, &buf, fdt, de->d_name, override_uid, override_gid, copy_flags);
+                        q = fd_copy_regular(dirfd(d), de->d_name, &buf, fdt, de->d_name, override_uid, override_gid, copy_flags, progress_bytes, userdata);
                 else if (S_ISLNK(buf.st_mode))
                         q = fd_copy_symlink(dirfd(d), de->d_name, &buf, fdt, de->d_name, override_uid, override_gid, copy_flags);
                 else if (S_ISFIFO(buf.st_mode))
@@ -578,9 +680,10 @@ static int fd_copy_directory(
                 else
                         q = -EOPNOTSUPP;
 
+                if (q == -EINTR) /* Propagate SIGINT up instantly */
+                        return q;
                 if (q == -EEXIST && (copy_flags & COPY_MERGE))
                         q = 0;
-
                 if (q < 0)
                         r = q;
         }
@@ -606,7 +709,18 @@ static int fd_copy_directory(
         return r;
 }
 
-int copy_tree_at(int fdf, const char *from, int fdt, const char *to, uid_t override_uid, gid_t override_gid, CopyFlags copy_flags) {
+int copy_tree_at_full(
+                int fdf,
+                const char *from,
+                int fdt,
+                const char *to,
+                uid_t override_uid,
+                gid_t override_gid,
+                CopyFlags copy_flags,
+                copy_progress_path_t progress_path,
+                copy_progress_bytes_t progress_bytes,
+                void *userdata) {
+
         struct stat st;
 
         assert(from);
@@ -616,9 +730,9 @@ int copy_tree_at(int fdf, const char *from, int fdt, const char *to, uid_t overr
                 return -errno;
 
         if (S_ISREG(st.st_mode))
-                return fd_copy_regular(fdf, from, &st, fdt, to, override_uid, override_gid, copy_flags);
+                return fd_copy_regular(fdf, from, &st, fdt, to, override_uid, override_gid, copy_flags, progress_bytes, userdata);
         else if (S_ISDIR(st.st_mode))
-                return fd_copy_directory(fdf, from, &st, fdt, to, st.st_dev, COPY_DEPTH_MAX, override_uid, override_gid, copy_flags);
+                return fd_copy_directory(fdf, from, &st, fdt, to, st.st_dev, COPY_DEPTH_MAX, override_uid, override_gid, copy_flags, NULL, progress_path, progress_bytes, userdata);
         else if (S_ISLNK(st.st_mode))
                 return fd_copy_symlink(fdf, from, &st, fdt, to, override_uid, override_gid, copy_flags);
         else if (S_ISFIFO(st.st_mode))
@@ -629,11 +743,14 @@ int copy_tree_at(int fdf, const char *from, int fdt, const char *to, uid_t overr
                 return -EOPNOTSUPP;
 }
 
-int copy_tree(const char *from, const char *to, uid_t override_uid, gid_t override_gid, CopyFlags copy_flags) {
-        return copy_tree_at(AT_FDCWD, from, AT_FDCWD, to, override_uid, override_gid, copy_flags);
-}
+int copy_directory_fd_full(
+                int dirfd,
+                const char *to,
+                CopyFlags copy_flags,
+                copy_progress_path_t progress_path,
+                copy_progress_bytes_t progress_bytes,
+                void *userdata) {
 
-int copy_directory_fd(int dirfd, const char *to, CopyFlags copy_flags) {
         struct stat st;
 
         assert(dirfd >= 0);
@@ -645,10 +762,17 @@ int copy_directory_fd(int dirfd, const char *to, CopyFlags copy_flags) {
         if (!S_ISDIR(st.st_mode))
                 return -ENOTDIR;
 
-        return fd_copy_directory(dirfd, NULL, &st, AT_FDCWD, to, st.st_dev, COPY_DEPTH_MAX, UID_INVALID, GID_INVALID, copy_flags);
+        return fd_copy_directory(dirfd, NULL, &st, AT_FDCWD, to, st.st_dev, COPY_DEPTH_MAX, UID_INVALID, GID_INVALID, copy_flags, NULL, progress_path, progress_bytes, userdata);
 }
 
-int copy_directory(const char *from, const char *to, CopyFlags copy_flags) {
+int copy_directory_full(
+                const char *from,
+                const char *to,
+                CopyFlags copy_flags,
+                copy_progress_path_t progress_path,
+                copy_progress_bytes_t progress_bytes,
+                void *userdata) {
+
         struct stat st;
 
         assert(from);
@@ -660,10 +784,16 @@ int copy_directory(const char *from, const char *to, CopyFlags copy_flags) {
         if (!S_ISDIR(st.st_mode))
                 return -ENOTDIR;
 
-        return fd_copy_directory(AT_FDCWD, from, &st, AT_FDCWD, to, st.st_dev, COPY_DEPTH_MAX, UID_INVALID, GID_INVALID, copy_flags);
+        return fd_copy_directory(AT_FDCWD, from, &st, AT_FDCWD, to, st.st_dev, COPY_DEPTH_MAX, UID_INVALID, GID_INVALID, copy_flags, NULL, progress_path, progress_bytes, userdata);
 }
 
-int copy_file_fd(const char *from, int fdt, CopyFlags copy_flags) {
+int copy_file_fd_full(
+                const char *from,
+                int fdt,
+                CopyFlags copy_flags,
+                copy_progress_bytes_t progress_bytes,
+                void *userdata) {
+
         _cleanup_close_ int fdf = -1;
         int r;
 
@@ -674,35 +804,55 @@ int copy_file_fd(const char *from, int fdt, CopyFlags copy_flags) {
         if (fdf < 0)
                 return -errno;
 
-        r = copy_bytes(fdf, fdt, (uint64_t) -1, copy_flags);
+        r = copy_bytes_full(fdf, fdt, (uint64_t) -1, copy_flags, NULL, NULL, progress_bytes, userdata);
 
-        (void) copy_times(fdf, fdt);
+        (void) copy_times(fdf, fdt, copy_flags);
         (void) copy_xattr(fdf, fdt);
 
         return r;
 }
 
-int copy_file(const char *from, const char *to, int flags, mode_t mode, unsigned chattr_flags, CopyFlags copy_flags) {
+int copy_file_full(
+                const char *from,
+                const char *to,
+                int flags,
+                mode_t mode,
+                unsigned chattr_flags,
+                unsigned chattr_mask,
+                CopyFlags copy_flags,
+                copy_progress_bytes_t progress_bytes,
+                void *userdata) {
+
         int fdt = -1, r;
 
         assert(from);
         assert(to);
 
         RUN_WITH_UMASK(0000) {
+                if (copy_flags & COPY_MAC_CREATE) {
+                        r = mac_selinux_create_file_prepare(to, S_IFREG);
+                        if (r < 0)
+                                return r;
+                }
                 fdt = open(to, flags|O_WRONLY|O_CREAT|O_CLOEXEC|O_NOCTTY, mode);
+                if (copy_flags & COPY_MAC_CREATE)
+                        mac_selinux_create_file_clear();
                 if (fdt < 0)
                         return -errno;
         }
 
-        if (chattr_flags != 0)
-                (void) chattr_fd(fdt, chattr_flags, (unsigned) -1, NULL);
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & CHATTR_EARLY_FL, NULL);
 
-        r = copy_file_fd(from, fdt, copy_flags);
+        r = copy_file_fd_full(from, fdt, copy_flags, progress_bytes, userdata);
         if (r < 0) {
                 close(fdt);
                 (void) unlink(to);
                 return r;
         }
+
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & ~CHATTR_EARLY_FL, NULL);
 
         if (close(fdt) < 0) {
                 unlink_noerrno(to);
@@ -712,7 +862,16 @@ int copy_file(const char *from, const char *to, int flags, mode_t mode, unsigned
         return 0;
 }
 
-int copy_file_atomic(const char *from, const char *to, mode_t mode, unsigned chattr_flags, CopyFlags copy_flags) {
+int copy_file_atomic_full(
+                const char *from,
+                const char *to,
+                mode_t mode,
+                unsigned chattr_flags,
+                unsigned chattr_mask,
+                CopyFlags copy_flags,
+                copy_progress_bytes_t progress_bytes,
+                void *userdata) {
+
         _cleanup_(unlink_and_freep) char *t = NULL;
         _cleanup_close_ int fdt = -1;
         int r;
@@ -731,21 +890,37 @@ int copy_file_atomic(const char *from, const char *to, mode_t mode, unsigned cha
                 if (r < 0)
                         return r;
 
+                if (copy_flags & COPY_MAC_CREATE) {
+                        r = mac_selinux_create_file_prepare(to, S_IFREG);
+                        if (r < 0) {
+                                t = mfree(t);
+                                return r;
+                        }
+                }
                 fdt = open(t, O_CREAT|O_EXCL|O_NOFOLLOW|O_NOCTTY|O_WRONLY|O_CLOEXEC, 0600);
+                if (copy_flags & COPY_MAC_CREATE)
+                        mac_selinux_create_file_clear();
                 if (fdt < 0) {
                         t = mfree(t);
                         return -errno;
                 }
         } else {
+                if (copy_flags & COPY_MAC_CREATE) {
+                        r = mac_selinux_create_file_prepare(to, S_IFREG);
+                        if (r < 0)
+                                return r;
+                }
                 fdt = open_tmpfile_linkable(to, O_WRONLY|O_CLOEXEC, &t);
+                if (copy_flags & COPY_MAC_CREATE)
+                        mac_selinux_create_file_clear();
                 if (fdt < 0)
                         return fdt;
         }
 
-        if (chattr_flags != 0)
-                (void) chattr_fd(fdt, chattr_flags, (unsigned) -1, NULL);
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & CHATTR_EARLY_FL, NULL);
 
-        r = copy_file_fd(from, fdt, copy_flags);
+        r = copy_file_fd_full(from, fdt, copy_flags, progress_bytes, userdata);
         if (r < 0)
                 return r;
 
@@ -761,14 +936,16 @@ int copy_file_atomic(const char *from, const char *to, mode_t mode, unsigned cha
                         return r;
         }
 
+        if (chattr_mask != 0)
+                (void) chattr_fd(fdt, chattr_flags, chattr_mask & ~CHATTR_EARLY_FL, NULL);
+
         t = mfree(t);
         return 0;
 }
 
-int copy_times(int fdf, int fdt) {
+int copy_times(int fdf, int fdt, CopyFlags flags) {
         struct timespec ut[2];
         struct stat st;
-        usec_t crtime = 0;
 
         assert(fdf >= 0);
         assert(fdt >= 0);
@@ -782,70 +959,39 @@ int copy_times(int fdf, int fdt) {
         if (futimens(fdt, ut) < 0)
                 return -errno;
 
-        if (fd_getcrtime(fdf, &crtime) >= 0)
-                (void) fd_setcrtime(fdt, crtime);
+        if (FLAGS_SET(flags, COPY_CRTIME)) {
+                usec_t crtime;
+
+                if (fd_getcrtime(fdf, &crtime) >= 0)
+                        (void) fd_setcrtime(fdt, crtime);
+        }
 
         return 0;
 }
 
 int copy_xattr(int fdf, int fdt) {
-        _cleanup_free_ char *bufa = NULL, *bufb = NULL;
-        size_t sza = 100, szb = 100;
-        ssize_t n;
-        int ret = 0;
+        _cleanup_free_ char *names = NULL;
+        int ret = 0, r;
         const char *p;
 
-        for (;;) {
-                bufa = malloc(sza);
-                if (!bufa)
-                        return -ENOMEM;
+        r = flistxattr_malloc(fdf, &names);
+        if (r < 0)
+                return r;
 
-                n = flistxattr(fdf, bufa, sza);
-                if (n == 0)
-                        return 0;
-                if (n > 0)
-                        break;
-                if (errno != ERANGE)
-                        return -errno;
+        NULSTR_FOREACH(p, names) {
+                _cleanup_free_ char *value = NULL;
 
-                sza *= 2;
+                if (!startswith(p, "user."))
+                        continue;
 
-                bufa = mfree(bufa);
-        }
+                r = fgetxattr_malloc(fdf, p, &value);
+                if (r == -ENODATA)
+                        continue; /* gone by now */
+                if (r < 0)
+                        return r;
 
-        p = bufa;
-        while (n > 0) {
-                size_t l;
-
-                l = strlen(p);
-                assert(l < (size_t) n);
-
-                if (startswith(p, "user.")) {
-                        ssize_t m;
-
-                        if (!bufb) {
-                                bufb = malloc(szb);
-                                if (!bufb)
-                                        return -ENOMEM;
-                        }
-
-                        m = fgetxattr(fdf, p, bufb, szb);
-                        if (m < 0) {
-                                if (errno == ERANGE) {
-                                        szb *= 2;
-                                        bufb = mfree(bufb);
-                                        continue;
-                                }
-
-                                return -errno;
-                        }
-
-                        if (fsetxattr(fdt, p, bufb, m, 0) < 0)
-                                ret = -errno;
-                }
-
-                p += l + 1;
-                n -= l + 1;
+                if (fsetxattr(fdt, p, value, r, 0) < 0)
+                        ret = -errno;
         }
 
         return ret;

@@ -1,21 +1,19 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
 #include <langinfo.h>
 #include <libintl.h>
-#include <locale.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
 #include "def.h"
 #include "dirent-util.h"
+#include "env-util.h"
 #include "fd-util.h"
 #include "hashmap.h"
 #include "locale-util.h"
@@ -25,6 +23,40 @@
 #include "string-util.h"
 #include "strv.h"
 #include "utf8.h"
+
+static char *normalize_locale(const char *name) {
+        const char *e;
+
+        /* Locale names are weird: glibc has some magic rules when looking for the charset name on disk: it
+         * lowercases everything, and removes most special chars. This means the official .UTF-8 suffix
+         * becomes .utf8 when looking things up on disk. When enumerating locales, let's do the reverse
+         * operation, and go back to ".UTF-8" which appears to be the more commonly accepted name. We only do
+         * that for UTF-8 however, since it's kinda the only charset that matters. */
+
+        e = endswith(name, ".utf8");
+        if (e) {
+                _cleanup_free_ char *prefix = NULL;
+
+                prefix = strndup(name, e - name);
+                if (!prefix)
+                        return NULL;
+
+                return strjoin(prefix, ".UTF-8");
+        }
+
+        e = strstr(name, ".utf8@");
+        if (e) {
+                _cleanup_free_ char *prefix = NULL;
+
+                prefix = strndup(name, e - name);
+                if (!prefix)
+                        return NULL;
+
+                return strjoin(prefix, ".UTF-8@", e + 6);
+        }
+
+        return strdup(name);
+}
 
 static int add_locales_from_archive(Set *locales) {
         /* Stolen from glibc... */
@@ -106,7 +138,7 @@ static int add_locales_from_archive(Set *locales) {
                 if (!utf8_is_valid((char*) p + e[i].name_offset))
                         continue;
 
-                z = strdup((char*) p + e[i].name_offset);
+                z = normalize_locale((char*) p + e[i].name_offset);
                 if (!z) {
                         r = -ENOMEM;
                         goto finish;
@@ -143,7 +175,7 @@ static int add_locales_from_libdir (Set *locales) {
                 if (entry->d_type != DT_DIR)
                         continue;
 
-                z = strdup(entry->d_name);
+                z = normalize_locale(entry->d_name);
                 if (!z)
                         return -ENOMEM;
 
@@ -175,6 +207,25 @@ int get_locales(char ***ret) {
         l = set_get_strv(locales);
         if (!l)
                 return -ENOMEM;
+
+        r = getenv_bool("SYSTEMD_LIST_NON_UTF8_LOCALES");
+        if (r == -ENXIO || r == 0) {
+                char **a, **b;
+
+                /* Filter out non-UTF-8 locales, because it's 2019, by default */
+                for (a = b = l; *a; a++) {
+
+                        if (endswith(*a, "UTF-8") ||
+                            strstr(*a, ".UTF-8@"))
+                                *(b++) = *a;
+                        else
+                                free(*a);
+                }
+
+                *b = NULL;
+
+        } else if (r < 0)
+                log_debug_errno(r, "Failed to parse $SYSTEMD_LIST_NON_UTF8_LOCALES as boolean");
 
         strv_sort(l);
 
@@ -234,7 +285,7 @@ bool is_locale_utf8(void) {
                 goto out;
         }
 
-        /* For LC_CTYPE=="C" return true, because CTYPE is effectly
+        /* For LC_CTYPE=="C" return true, because CTYPE is effectively
          * unset and everything can do to UTF-8 nowadays. */
         set = setlocale(LC_CTYPE, NULL);
         if (!set) {
@@ -254,97 +305,22 @@ out:
         return (bool) cached_answer;
 }
 
-static thread_local Set *keymaps = NULL;
+static bool emoji_enabled(void) {
+        static int cached_emoji_enabled = -1;
 
-static int nftw_cb(
-                const char *fpath,
-                const struct stat *sb,
-                int tflag,
-                struct FTW *ftwbuf) {
+        if (cached_emoji_enabled < 0) {
+                int val;
 
-        char *p, *e;
-        int r;
-
-        if (tflag != FTW_F)
-                return 0;
-
-        if (!endswith(fpath, ".map") &&
-            !endswith(fpath, ".map.gz"))
-                return 0;
-
-        p = strdup(basename(fpath));
-        if (!p)
-                return FTW_STOP;
-
-        e = endswith(p, ".map");
-        if (e)
-                *e = 0;
-
-        e = endswith(p, ".map.gz");
-        if (e)
-                *e = 0;
-
-        r = set_consume(keymaps, p);
-        if (r < 0 && r != -EEXIST)
-                return r;
-
-        return 0;
-}
-
-int get_keymaps(char ***ret) {
-        _cleanup_strv_free_ char **l = NULL;
-        const char *dir;
-        int r;
-
-        keymaps = set_new(&string_hash_ops);
-        if (!keymaps)
-                return -ENOMEM;
-
-        NULSTR_FOREACH(dir, KBD_KEYMAP_DIRS) {
-                r = nftw(dir, nftw_cb, 20, FTW_PHYS|FTW_ACTIONRETVAL);
-
-                if (r == FTW_STOP)
-                        log_debug("Directory not found %s", dir);
-                else if (r < 0)
-                        log_debug_errno(r, "Can't add keymap: %m");
+                val = getenv_bool("SYSTEMD_EMOJI");
+                if (val < 0)
+                        cached_emoji_enabled =
+                                is_locale_utf8() &&
+                                !STRPTR_IN_SET(getenv("TERM"), "dumb", "linux");
+                else
+                        cached_emoji_enabled = val;
         }
 
-        l = set_get_strv(keymaps);
-        if (!l) {
-                set_free_free(keymaps);
-                return -ENOMEM;
-        }
-
-        set_free(keymaps);
-
-        if (strv_isempty(l))
-                return -ENOENT;
-
-        strv_sort(l);
-
-        *ret = TAKE_PTR(l);
-
-        return 0;
-}
-
-bool keymap_is_valid(const char *name) {
-
-        if (isempty(name))
-                return false;
-
-        if (strlen(name) >= 128)
-                return false;
-
-        if (!utf8_is_valid(name))
-                return false;
-
-        if (!filename_is_valid(name))
-                return false;
-
-        if (!string_is_safe(name))
-                return false;
-
-        return true;
+        return cached_emoji_enabled;
 }
 
 const char *special_glyph(SpecialGlyph code) {
@@ -359,34 +335,79 @@ const char *special_glyph(SpecialGlyph code) {
         static const char* const draw_table[2][_SPECIAL_GLYPH_MAX] = {
                 /* ASCII fallback */
                 [false] = {
-                        [TREE_VERTICAL]      = "| ",
-                        [TREE_BRANCH]        = "|-",
-                        [TREE_RIGHT]         = "`-",
-                        [TREE_SPACE]         = "  ",
-                        [TRIANGULAR_BULLET]  = ">",
-                        [BLACK_CIRCLE]       = "*",
-                        [ARROW]              = "->",
-                        [MDASH]              = "-",
-                        [ELLIPSIS]           = "...",
-                        [MU]                 = "u",
+                        [SPECIAL_GLYPH_TREE_VERTICAL]           = "| ",
+                        [SPECIAL_GLYPH_TREE_BRANCH]             = "|-",
+                        [SPECIAL_GLYPH_TREE_RIGHT]              = "`-",
+                        [SPECIAL_GLYPH_TREE_SPACE]              = "  ",
+                        [SPECIAL_GLYPH_TRIANGULAR_BULLET]       = ">",
+                        [SPECIAL_GLYPH_BLACK_CIRCLE]            = "*",
+                        [SPECIAL_GLYPH_BULLET]                  = "*",
+                        [SPECIAL_GLYPH_MU]                      = "u",
+                        [SPECIAL_GLYPH_CHECK_MARK]              = "+",
+                        [SPECIAL_GLYPH_CROSS_MARK]              = "-",
+                        [SPECIAL_GLYPH_LIGHT_SHADE]             = "-",
+                        [SPECIAL_GLYPH_DARK_SHADE]              = "X",
+                        [SPECIAL_GLYPH_SIGMA]                   = "S",
+                        [SPECIAL_GLYPH_ARROW]                   = "->",
+                        [SPECIAL_GLYPH_ELLIPSIS]                = "...",
+                        [SPECIAL_GLYPH_ECSTATIC_SMILEY]         = ":-]",
+                        [SPECIAL_GLYPH_HAPPY_SMILEY]            = ":-}",
+                        [SPECIAL_GLYPH_SLIGHTLY_HAPPY_SMILEY]   = ":-)",
+                        [SPECIAL_GLYPH_NEUTRAL_SMILEY]          = ":-|",
+                        [SPECIAL_GLYPH_SLIGHTLY_UNHAPPY_SMILEY] = ":-(",
+                        [SPECIAL_GLYPH_UNHAPPY_SMILEY]          = ":-{",
+                        [SPECIAL_GLYPH_DEPRESSED_SMILEY]        = ":-[",
                 },
 
                 /* UTF-8 */
                 [true] = {
-                        [TREE_VERTICAL]      = "\342\224\202 ",            /* │  */
-                        [TREE_BRANCH]        = "\342\224\234\342\224\200", /* ├─ */
-                        [TREE_RIGHT]         = "\342\224\224\342\224\200", /* └─ */
-                        [TREE_SPACE]         = "  ",                       /*    */
-                        [TRIANGULAR_BULLET]  = "\342\200\243",             /* ‣ */
-                        [BLACK_CIRCLE]       = "\342\227\217",             /* ● */
-                        [ARROW]              = "\342\206\222",             /* → */
-                        [MDASH]              = "\342\200\223",             /* – */
-                        [ELLIPSIS]           = "\342\200\246",             /* … */
-                        [MU]                 = "\316\274",                 /* μ */
+                        /* The following are multiple glyphs in both ASCII and in UNICODE */
+                        [SPECIAL_GLYPH_TREE_VERTICAL]           = "\342\224\202 ",            /* │  */
+                        [SPECIAL_GLYPH_TREE_BRANCH]             = "\342\224\234\342\224\200", /* ├─ */
+                        [SPECIAL_GLYPH_TREE_RIGHT]              = "\342\224\224\342\224\200", /* └─ */
+                        [SPECIAL_GLYPH_TREE_SPACE]              = "  ",                       /*    */
+
+                        /* Single glyphs in both cases */
+                        [SPECIAL_GLYPH_TRIANGULAR_BULLET]       = "\342\200\243",             /* ‣ */
+                        [SPECIAL_GLYPH_BLACK_CIRCLE]            = "\342\227\217",             /* ● */
+                        [SPECIAL_GLYPH_BULLET]                  = "\342\200\242",             /* • */
+                        [SPECIAL_GLYPH_MU]                      = "\316\274",                 /* μ (actually called: GREEK SMALL LETTER MU) */
+                        [SPECIAL_GLYPH_CHECK_MARK]              = "\342\234\223",             /* ✓ */
+                        [SPECIAL_GLYPH_CROSS_MARK]              = "\342\234\227",             /* ✗ (actually called: BALLOT X) */
+                        [SPECIAL_GLYPH_LIGHT_SHADE]             = "\342\226\221",             /* ░ */
+                        [SPECIAL_GLYPH_DARK_SHADE]              = "\342\226\223",             /* ▒ */
+                        [SPECIAL_GLYPH_SIGMA]                   = "\316\243",                 /* Σ */
+
+                        /* Single glyph in Unicode, two in ASCII */
+                        [SPECIAL_GLYPH_ARROW]                   = "\342\206\222",             /* → (actually called: RIGHTWARDS ARROW) */
+
+                        /* Single glyph in Unicode, three in ASCII */
+                        [SPECIAL_GLYPH_ELLIPSIS]                = "\342\200\246",             /* … (actually called: HORIZONTAL ELLIPSIS) */
+
+                        /* These smileys are a single glyph in Unicode, and three in ASCII */
+                        [SPECIAL_GLYPH_ECSTATIC_SMILEY]         = "\360\237\230\207",         /* 😇 (actually called: SMILING FACE WITH HALO) */
+                        [SPECIAL_GLYPH_HAPPY_SMILEY]            = "\360\237\230\200",         /* 😀 (actually called: GRINNING FACE) */
+                        [SPECIAL_GLYPH_SLIGHTLY_HAPPY_SMILEY]   = "\360\237\231\202",         /* 🙂 (actually called: SLIGHTLY SMILING FACE) */
+                        [SPECIAL_GLYPH_NEUTRAL_SMILEY]          = "\360\237\230\220",         /* 😐 (actually called: NEUTRAL FACE) */
+                        [SPECIAL_GLYPH_SLIGHTLY_UNHAPPY_SMILEY] = "\360\237\231\201",         /* 🙁 (actually called: SLIGHTLY FROWNING FACE) */
+                        [SPECIAL_GLYPH_UNHAPPY_SMILEY]          = "\360\237\230\250",         /* 😨 (actually called: FEARFUL FACE) */
+                        [SPECIAL_GLYPH_DEPRESSED_SMILEY]        = "\360\237\244\242",         /* 🤢 (actually called: NAUSEATED FACE) */
                 },
         };
 
-        return draw_table[is_locale_utf8()][code];
+        assert(code < _SPECIAL_GLYPH_MAX);
+
+        return draw_table[code >= _SPECIAL_GLYPH_FIRST_SMILEY ? emoji_enabled() : is_locale_utf8()][code];
+}
+
+void locale_variables_free(char *l[_VARIABLE_LC_MAX]) {
+        LocaleVariable i;
+
+        if (!l)
+                return;
+
+        for (i = 0; i < _VARIABLE_LC_MAX; i++)
+                l[i] = mfree(l[i]);
 }
 
 static const char * const locale_variable_table[_VARIABLE_LC_MAX] = {

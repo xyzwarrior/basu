@@ -3,9 +3,9 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include "alloc-util.h"
+#include "format-util.h"
 #include "fs-util.h"
 #include "macro.h"
 #include "mkdir.h"
@@ -13,6 +13,7 @@
 #include "stat-util.h"
 #include "stdio-util.h"
 #include "user-util.h"
+#include "missing_stdlib.h"
 
 int mkdir_safe_internal(const char *path, mode_t mode, uid_t uid, gid_t gid, MkdirFlags flags, mkdir_func_t _mkdir) {
         struct stat st;
@@ -32,7 +33,7 @@ int mkdir_safe_internal(const char *path, mode_t mode, uid_t uid, gid_t gid, Mkd
         if ((flags & MKDIR_FOLLOW_SYMLINK) && S_ISLNK(st.st_mode)) {
                 _cleanup_free_ char *p = NULL;
 
-                r = chase_symlinks(path, NULL, CHASE_NONEXISTENT, &p);
+                r = chase_symlinks(path, NULL, CHASE_NONEXISTENT, &p, NULL);
                 if (r < 0)
                         return r;
                 if (r == 0)

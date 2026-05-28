@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
+#include <sys/time.h>
+
 #include "alloc-util.h"
 #include "bus-dump.h"
 #include "bus-internal.h"
@@ -16,23 +18,23 @@
 #include "terminal-util.h"
 #include "util.h"
 
-static char *indent(unsigned level, unsigned flags) {
+static char *indent(unsigned level, uint64_t flags) {
         char *p;
         unsigned n, i = 0;
 
         n = 0;
 
-        if (flags & BUS_MESSAGE_DUMP_SUBTREE_ONLY && level > 0)
+        if (flags & SD_BUS_MESSAGE_DUMP_SUBTREE_ONLY && level > 0)
                 level -= 1;
 
-        if (flags & BUS_MESSAGE_DUMP_WITH_HEADER)
+        if (flags & SD_BUS_MESSAGE_DUMP_WITH_HEADER)
                 n += 2;
 
         p = new(char, n + level*8 + 1);
         if (!p)
                 return NULL;
 
-        if (flags & BUS_MESSAGE_DUMP_WITH_HEADER) {
+        if (flags & SD_BUS_MESSAGE_DUMP_WITH_HEADER) {
                 p[i++] = ' ';
                 p[i++] = ' ';
         }
@@ -43,7 +45,7 @@ static char *indent(unsigned level, unsigned flags) {
         return p;
 }
 
-int bus_message_dump(sd_bus_message *m, FILE *f, unsigned flags) {
+_public_ int sd_bus_message_dump(sd_bus_message *m, FILE *f, uint64_t flags) {
         unsigned level = 1;
         int r;
 
@@ -52,13 +54,13 @@ int bus_message_dump(sd_bus_message *m, FILE *f, unsigned flags) {
         if (!f)
                 f = stdout;
 
-        if (flags & BUS_MESSAGE_DUMP_WITH_HEADER) {
+        if (flags & SD_BUS_MESSAGE_DUMP_WITH_HEADER) {
                 fprintf(f,
                         "%s%s%s Type=%s%s%s  Endian=%c  Flags=%u  Version=%u  Priority=%"PRIi64,
                         m->header->type == SD_BUS_MESSAGE_METHOD_ERROR ? ansi_highlight_red() :
                         m->header->type == SD_BUS_MESSAGE_METHOD_RETURN ? ansi_highlight_green() :
                         m->header->type != SD_BUS_MESSAGE_SIGNAL ? ansi_highlight() : "",
-                        special_glyph(TRIANGULAR_BULLET),
+                        special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET),
                         ansi_normal(),
 
                         ansi_highlight(),
@@ -116,11 +118,11 @@ int bus_message_dump(sd_bus_message *m, FILE *f, unsigned flags) {
                 bus_creds_dump(&m->creds, f, true);
         }
 
-        r = sd_bus_message_rewind(m, !(flags & BUS_MESSAGE_DUMP_SUBTREE_ONLY));
+        r = sd_bus_message_rewind(m, !(flags & SD_BUS_MESSAGE_DUMP_SUBTREE_ONLY));
         if (r < 0)
                 return log_error_errno(r, "Failed to rewind: %m");
 
-        if (!(flags & BUS_MESSAGE_DUMP_SUBTREE_ONLY)) {
+        if (!(flags & SD_BUS_MESSAGE_DUMP_SUBTREE_ONLY)) {
                 _cleanup_free_ char *prefix = NULL;
 
                 prefix = indent(0, flags);
@@ -257,7 +259,7 @@ int bus_message_dump(sd_bus_message *m, FILE *f, unsigned flags) {
                 }
         }
 
-        if (!(flags & BUS_MESSAGE_DUMP_SUBTREE_ONLY)) {
+        if (!(flags & SD_BUS_MESSAGE_DUMP_SUBTREE_ONLY)) {
                 _cleanup_free_ char *prefix = NULL;
 
                 prefix = indent(0, flags);

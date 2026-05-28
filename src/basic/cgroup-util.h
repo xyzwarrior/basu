@@ -9,8 +9,6 @@
 #include <sys/types.h>
 
 #include "def.h"
-#include "hashmap.h"
-#include "macro.h"
 #include "set.h"
 
 #define SYSTEMD_CGROUP_CONTROLLER_LEGACY "name=systemd"
@@ -22,6 +20,7 @@ typedef enum CGroupController {
         /* Original cgroup controllers */
         CGROUP_CONTROLLER_CPU,
         CGROUP_CONTROLLER_CPUACCT,    /* v1 only */
+        CGROUP_CONTROLLER_CPUSET,     /* v2 only */
         CGROUP_CONTROLLER_IO,         /* v2 only */
         CGROUP_CONTROLLER_BLKIO,      /* v1 only */
         CGROUP_CONTROLLER_MEMORY,
@@ -42,6 +41,7 @@ typedef enum CGroupController {
 typedef enum CGroupMask {
         CGROUP_MASK_CPU = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_CPU),
         CGROUP_MASK_CPUACCT = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_CPUACCT),
+        CGROUP_MASK_CPUSET = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_CPUSET),
         CGROUP_MASK_IO = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_IO),
         CGROUP_MASK_BLKIO = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_BLKIO),
         CGROUP_MASK_MEMORY = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_MEMORY),
@@ -50,17 +50,29 @@ typedef enum CGroupMask {
         CGROUP_MASK_BPF_FIREWALL = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_BPF_FIREWALL),
         CGROUP_MASK_BPF_DEVICES = CGROUP_CONTROLLER_TO_MASK(CGROUP_CONTROLLER_BPF_DEVICES),
 
-        /* All real cgroupv1 controllers */
+        /* All real cgroup v1 controllers */
         CGROUP_MASK_V1 = CGROUP_MASK_CPU|CGROUP_MASK_CPUACCT|CGROUP_MASK_BLKIO|CGROUP_MASK_MEMORY|CGROUP_MASK_DEVICES|CGROUP_MASK_PIDS,
 
-        /* All real cgroupv2 controllers */
-        CGROUP_MASK_V2 = CGROUP_MASK_CPU|CGROUP_MASK_IO|CGROUP_MASK_MEMORY|CGROUP_MASK_PIDS,
+        /* All real cgroup v2 controllers */
+        CGROUP_MASK_V2 = CGROUP_MASK_CPU|CGROUP_MASK_CPUSET|CGROUP_MASK_IO|CGROUP_MASK_MEMORY|CGROUP_MASK_PIDS,
 
-        /* All cgroupv2 BPF pseudo-controllers */
+        /* All cgroup v2 BPF pseudo-controllers */
         CGROUP_MASK_BPF = CGROUP_MASK_BPF_FIREWALL|CGROUP_MASK_BPF_DEVICES,
 
         _CGROUP_MASK_ALL = CGROUP_CONTROLLER_TO_MASK(_CGROUP_CONTROLLER_MAX) - 1
 } CGroupMask;
+
+static inline CGroupMask CGROUP_MASK_EXTEND_JOINED(CGroupMask mask) {
+        /* We always mount "cpu" and "cpuacct" in the same hierarchy. Hence, when one bit is set also set the other */
+
+        if (mask & (CGROUP_MASK_CPU|CGROUP_MASK_CPUACCT))
+                mask |= (CGROUP_MASK_CPU|CGROUP_MASK_CPUACCT);
+
+        return mask;
+}
+
+CGroupMask get_cpu_accounting_mask(void);
+bool cpu_accounting_is_cheap(void);
 
 /* Special values for all weight knobs on unified hierarchy */
 #define CGROUP_WEIGHT_INVALID ((uint64_t) -1)
@@ -117,10 +129,6 @@ static inline bool CGROUP_BLKIO_WEIGHT_IS_OK(uint64_t x) {
             (x >= CGROUP_BLKIO_WEIGHT_MIN && x <= CGROUP_BLKIO_WEIGHT_MAX);
 }
 
-/* Default resource limits */
-#define DEFAULT_TASKS_MAX_PERCENTAGE            15U /* 15% of PIDs, 4915 on default settings */
-#define DEFAULT_USER_TASKS_MAX_PERCENTAGE       33U /* 33% of PIDs, 10813 on default settings */
-
 typedef enum CGroupUnified {
         CGROUP_UNIFIED_UNKNOWN = -1,
         CGROUP_UNIFIED_NONE = 0,        /* Both systemd and controllers on legacy */
@@ -152,19 +160,15 @@ int cg_enumerate_subgroups(const char *controller, const char *path, DIR **_d);
 int cg_read_subgroup(DIR *d, char **fn);
 
 typedef enum CGroupFlags {
-        CGROUP_SIGCONT     = 1,
-        CGROUP_IGNORE_SELF = 2,
-        CGROUP_REMOVE      = 4,
+        CGROUP_SIGCONT     = 1 << 0,
+        CGROUP_IGNORE_SELF = 1 << 1,
+        CGROUP_REMOVE      = 1 << 2,
 } CGroupFlags;
 
-typedef void (*cg_kill_log_func_t)(pid_t pid, int sig, void *userdata);
+typedef int (*cg_kill_log_func_t)(pid_t pid, int sig, void *userdata);
 
 int cg_kill(const char *controller, const char *path, int sig, CGroupFlags flags, Set *s, cg_kill_log_func_t kill_log, void *userdata);
 int cg_kill_recursive(const char *controller, const char *path, int sig, CGroupFlags flags, Set *s, cg_kill_log_func_t kill_log, void *userdata);
-
-int cg_migrate(const char *cfrom, const char *pfrom, const char *cto, const char *pto, CGroupFlags flags);
-int cg_migrate_recursive(const char *cfrom, const char *pfrom, const char *cto, const char *pto, CGroupFlags flags);
-int cg_migrate_recursive_fallback(const char *cfrom, const char *pfrom, const char *cto, const char *pto, CGroupFlags flags);
 
 int cg_split_spec(const char *spec, char **controller, char **path);
 int cg_mangle_path(const char *path, char **result);
@@ -174,14 +178,7 @@ int cg_get_path_and_check(const char *controller, const char *path, const char *
 
 int cg_pid_get_path(const char *controller, pid_t pid, char **path);
 
-int cg_trim(const char *controller, const char *path, bool delete_root);
-
 int cg_rmdir(const char *controller, const char *path);
-
-int cg_create(const char *controller, const char *path);
-int cg_attach(const char *controller, const char *path, pid_t pid);
-int cg_attach_fallback(const char *controller, const char *path, pid_t pid);
-int cg_create_and_attach(const char *controller, const char *path, pid_t pid);
 
 int cg_set_attribute(const char *controller, const char *path, const char *attribute, const char *value);
 int cg_get_attribute(const char *controller, const char *path, const char *attribute, char **ret);
@@ -191,6 +188,7 @@ int cg_set_access(const char *controller, const char *path, uid_t uid, gid_t gid
 
 int cg_set_xattr(const char *controller, const char *path, const char *name, const void *value, size_t size, int flags);
 int cg_get_xattr(const char *controller, const char *path, const char *name, void *value, size_t size);
+int cg_remove_xattr(const char *controller, const char *path, const char *name);
 
 int cg_install_release_agent(const char *controller, const char *agent);
 int cg_uninstall_release_agent(const char *controller);
@@ -230,13 +228,6 @@ int cg_slice_to_path(const char *unit, char **ret);
 
 typedef const char* (*cg_migrate_callback_t)(CGroupMask mask, void *userdata);
 
-int cg_create_everywhere(CGroupMask supported, CGroupMask mask, const char *path);
-int cg_attach_everywhere(CGroupMask supported, const char *path, pid_t pid, cg_migrate_callback_t callback, void *userdata);
-int cg_attach_many_everywhere(CGroupMask supported, const char *path, Set* pids, cg_migrate_callback_t callback, void *userdata);
-int cg_migrate_everywhere(CGroupMask supported, const char *from, const char *to, cg_migrate_callback_t callback, void *userdata);
-int cg_trim_everywhere(CGroupMask supported, const char *path, bool delete_root);
-int cg_enable_everywhere(CGroupMask supported, CGroupMask mask, const char *p);
-
 int cg_mask_supported(CGroupMask *ret);
 int cg_mask_from_string(const char *s, CGroupMask *ret);
 int cg_mask_to_string(CGroupMask mask, char **ret);
@@ -248,18 +239,13 @@ bool cg_ns_supported(void);
 int cg_all_unified(void);
 int cg_hybrid_unified(void);
 int cg_unified_controller(const char *controller);
-int cg_unified_flush(void);
-
-bool cg_is_unified_wanted(void);
-bool cg_is_legacy_wanted(void);
-bool cg_is_hybrid_wanted(void);
+int cg_unified_cached(bool flush);
+static inline int cg_unified(void) {
+        return cg_unified_cached(true);
+}
 
 const char* cgroup_controller_to_string(CGroupController c) _const_;
 CGroupController cgroup_controller_from_string(const char *s) _pure_;
-
-int cg_weight_parse(const char *s, uint64_t *ret);
-int cg_cpu_shares_parse(const char *s, uint64_t *ret);
-int cg_blkio_weight_parse(const char *s, uint64_t *ret);
 
 bool is_cgroup_fs(const struct statfs *s);
 bool fd_is_cgroup_fs(int fd);

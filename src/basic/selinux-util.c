@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <malloc.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <syslog.h>
 
@@ -16,6 +18,7 @@
 #endif
 
 #include "alloc-util.h"
+#include "errno-util.h"
 #include "fd-util.h"
 #include "log.h"
 #include "macro.h"
@@ -23,20 +26,16 @@
 #include "selinux-util.h"
 #include "stdio-util.h"
 #include "time-util.h"
-#include "util.h"
 
 #if HAVE_SELINUX
-DEFINE_TRIVIAL_CLEANUP_FUNC(char*, freecon);
 DEFINE_TRIVIAL_CLEANUP_FUNC(context_t, context_free);
-
-#define _cleanup_freecon_ _cleanup_(freeconp)
 #define _cleanup_context_free_ _cleanup_(context_freep)
 
 static int cached_use = -1;
 static struct selabel_handle *label_hnd = NULL;
 
-#define log_enforcing(...) log_full(security_getenforce() == 1 ? LOG_ERR : LOG_DEBUG, __VA_ARGS__)
-#define log_enforcing_errno(r, ...) log_full_errno(security_getenforce() == 1 ? LOG_ERR : LOG_DEBUG, r, __VA_ARGS__)
+#define log_enforcing(...) log_full(security_getenforce() == 1 ? LOG_ERR : LOG_WARNING, __VA_ARGS__)
+#define log_enforcing_errno(r, ...) log_full_errno(security_getenforce() == 1 ? LOG_ERR : LOG_WARNING, r, __VA_ARGS__)
 #endif
 
 bool mac_selinux_use(void) {
@@ -102,6 +101,26 @@ void mac_selinux_finish(void) {
 
         selabel_close(label_hnd);
         label_hnd = NULL;
+#endif
+}
+
+void mac_selinux_reload(void) {
+
+#if HAVE_SELINUX
+        struct selabel_handle *backup_label_hnd;
+
+        if (!label_hnd)
+                return;
+
+        backup_label_hnd = TAKE_PTR(label_hnd);
+
+        /* try to initialize new handle
+         *    on success close backup
+         *    on failure restore backup */
+        if (mac_selinux_init() == 0)
+                selabel_close(backup_label_hnd);
+        else
+                label_hnd = backup_label_hnd;
 #endif
 }
 
@@ -214,6 +233,9 @@ int mac_selinux_get_create_label_from_exe(const char *exe, char **label) {
                 return -errno;
 
         sclass = string_to_security_class("process");
+        if (sclass == 0)
+                return -ENOSYS;
+
         r = security_compute_create_raw(mycon, fcon, sclass, label);
         if (r < 0)
                 return -errno;
@@ -293,6 +315,9 @@ int mac_selinux_get_child_mls_label(int socket_fd, const char *exe, const char *
                 return -ENOMEM;
 
         sclass = string_to_security_class("process");
+        if (sclass == 0)
+                return -ENOSYS;
+
         r = security_compute_create_raw(mycon, fcon, sclass, label);
         if (r < 0)
                 return -errno;
@@ -366,11 +391,9 @@ int mac_selinux_create_file_prepare_at(int dirfd, const char *path, mode_t mode)
                 if (r < 0)
                         return r;
 
-                abspath = path_join(NULL, p, path);
-                if (!abspath)
+                path = abspath = path_join(p, path);
+                if (!path)
                         return -ENOMEM;
-
-                path = abspath;
         }
 
         r = selinux_create_file_prepare_abspath(path, mode);
