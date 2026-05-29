@@ -697,4 +697,9 @@ global:
         sd_event_source_set_child_process_own;
         sd_event_source_send_child_signal;
         sd_journal_open_namespace;
+
+        sd_bus_interface_name_is_valid;
+        sd_bus_service_name_is_valid;
+        sd_bus_member_name_is_valid;
+        sd_bus_object_path_is_valid;
 } LIBSYSTEMD_243;
