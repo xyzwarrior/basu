@@ -4,6 +4,7 @@
 
 #include "sd-bus.h"
 
+#include "bus-internal.h"
 #include "bus-type.h"
 
 bool bus_type_is_valid(char c) {
