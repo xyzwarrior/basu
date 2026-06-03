@@ -183,7 +183,8 @@ libcore_sources = '''
 #            ['user.conf',        pkgsysconfdir],
 #            ['systemd.pc',       pkgconfigdatadir],
 #            ['triggers.systemd', '']]
-in_files = [['systemd.pc',        pkgconfigdatadir]]
+in_files = [['systemd.pc',        pkgconfigdatadir],
+            ['systemd.pc',        pkgconfiglibdir]]
 
 foreach item : in_files
         file = item[0]
