@@ -12,6 +12,7 @@ rootprefix=@rootprefix_noslash@
 sysconfdir=@sysconfdir@
 systemdutildir=${rootprefix}/lib/systemd
 systemdsystemunitdir=${rootprefix}/lib/systemd/system
+systemd_system_unit_dir=${systemdsystemunitdir}
 systemdsystempresetdir=${rootprefix}/lib/systemd/system-preset
 systemduserunitdir=${prefix}/lib/systemd/user
 systemduserpresetdir=${prefix}/lib/systemd/user-preset
