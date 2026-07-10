@@ -2006,14 +2006,14 @@ endif
 #public_programs += exe
 
 
-if get_option('link-systemctl-shared')
-        systemctl_link_with = [libshared]
-else
-        systemctl_link_with = [libsystemd_static,
-                               libshared_static,
-                               libjournal_client,
-                               libbasic_gcrypt]
-endif
+#if get_option('link-systemctl-shared')
+#        systemctl_link_with = [libshared]
+#else
+#        systemctl_link_with = [libsystemd_static,
+#                               libshared_static,
+#                               libjournal_client,
+#                               libbasic_gcrypt]
+#endif
 
 #exe = executable('systemctl',
 #                 'src/systemctl/systemctl.c',
@@ -2797,57 +2797,57 @@ exe = executable('busctl',
                  install : true)
 public_programs += exe
 
-if conf.get('ENABLE_SYSUSERS') == 111
-        exe = executable('systemd-sysusers',
-                         'src/sysusers/sysusers.c',
-                         include_directories : includes,
-                         link_with : [libshared],
-                         install_rpath : rootlibexecdir,
-                         install : true,
-                         install_dir : rootbindir)
-        public_programs += exe
-endif
+#if conf.get('ENABLE_SYSUSERS') == 111
+#        exe = executable('systemd-sysusers',
+#                         'src/sysusers/sysusers.c',
+#                         include_directories : includes,
+#                         link_with : [libshared],
+#                         install_rpath : rootlibexecdir,
+#                         install : true,
+#                         install_dir : rootbindir)
+#        public_programs += exe
+#endif
 
-if conf.get('ENABLE_TMPFILES') == 111
-        exe = executable('systemd-tmpfiles',
-                         'src/tmpfiles/tmpfiles.c',
-                         include_directories : includes,
-                         link_with : [libshared],
-                         dependencies : [libacl],
-                         install_rpath : rootlibexecdir,
-                         install : true,
-                         install_dir : rootbindir)
-        public_programs += exe
+#if conf.get('ENABLE_TMPFILES') == 111
+#        exe = executable('systemd-tmpfiles',
+#                         'src/tmpfiles/tmpfiles.c',
+#                         include_directories : includes,
+#                         link_with : [libshared],
+#                         dependencies : [libacl],
+#                         install_rpath : rootlibexecdir,
+#                         install : true,
+#                         install_dir : rootbindir)
+#        public_programs += exe
 
-        if want_tests != 'false'
-                test('test-systemd-tmpfiles',
-                     test_systemd_tmpfiles_py,
-                     # https://github.com/mesonbuild/meson/issues/2681
-                     args : exe.full_path())
-        endif
-endif
+#        if want_tests != 'false'
+#                test('test-systemd-tmpfiles',
+#                     test_systemd_tmpfiles_py,
+#                     # https://github.com/mesonbuild/meson/issues/2681
+#                     args : exe.full_path())
+#        endif
+#endif
 
-if conf.get('ENABLE_HWDB') == 111
-        exe = executable('systemd-hwdb',
-                         'src/hwdb/hwdb.c',
-                         'src/libsystemd/sd-hwdb/hwdb-internal.h',
-                         include_directories : includes,
-                         link_with : [libudev_static],
-                         install_rpath : udev_rpath,
-                         install : true,
-                         install_dir : rootbindir)
-        public_programs += exe
-endif
+#if conf.get('ENABLE_HWDB') == 111
+#        exe = executable('systemd-hwdb',
+#                         'src/hwdb/hwdb.c',
+#                         'src/libsystemd/sd-hwdb/hwdb-internal.h',
+#                         include_directories : includes,
+#                         link_with : [libudev_static],
+#                         install_rpath : udev_rpath,
+#                         install : true,
+#                         install_dir : rootbindir)
+#        public_programs += exe
+#endif
 
-if conf.get('ENABLE_QUOTACHECK') == 111
-        executable('systemd-quotacheck',
-                   'src/quotacheck/quotacheck.c',
-                   include_directories : includes,
-                   link_with : [libshared],
-                   install_rpath : rootlibexecdir,
-                   install : true,
-                   install_dir : rootlibexecdir)
-endif
+#if conf.get('ENABLE_QUOTACHECK') == 111
+#        executable('systemd-quotacheck',
+#                   'src/quotacheck/quotacheck.c',
+#                   include_directories : includes,
+#                   link_with : [libshared],
+#                   install_rpath : rootlibexecdir,
+#                   install : true,
+#                   install_dir : rootlibexecdir)
+#endif
 
 #exe = executable('systemd-socket-proxyd',
 #                 'src/socket-proxy/socket-proxyd.c',
@@ -2922,21 +2922,21 @@ endif
 #           install : true,
 #           install_dir : rootlibexecdir)
 
-if conf.get('HAVE_KMOD') == 111
-        executable('systemd-modules-load',
-                   'src/modules-load/modules-load.c',
-                   include_directories : includes,
-                   link_with : [libshared],
-                   dependencies : [libkmod],
-                   install_rpath : rootlibexecdir,
-                   install : true,
-                   install_dir : rootlibexecdir)
-
-        meson.add_install_script('sh', '-c',
-                                 mkdir_p.format(modulesloaddir))
-        meson.add_install_script('sh', '-c',
-                                 mkdir_p.format(join_paths(sysconfdir, 'modules-load.d')))
-endif
+#if conf.get('HAVE_KMOD') == 111
+#        executable('systemd-modules-load',
+#                   'src/modules-load/modules-load.c',
+#                   include_directories : includes,
+#                   link_with : [libshared],
+#                   dependencies : [libkmod],
+#                   install_rpath : rootlibexecdir,
+#                   install : true,
+#                   install_dir : rootlibexecdir)
+#
+#        meson.add_install_script('sh', '-c',
+#                                 mkdir_p.format(modulesloaddir))
+#        meson.add_install_script('sh', '-c',
+#                                 mkdir_p.format(join_paths(sysconfdir, 'modules-load.d')))
+#endif
 
 #exe = executable('systemd-nspawn',
 #                 systemd_nspawn_sources,
@@ -2950,46 +2950,46 @@ endif
 #                 install : true)
 #public_programs += exe
 
-if conf.get('ENABLE_NETWORKD') == 111
-        executable('systemd-networkd',
-                   systemd_networkd_sources,
-                   include_directories : network_include_dir,
-                   link_with : [libnetworkd_core,
-                                libsystemd_network,
-                                libudev_static,
-                                networkd_link_with],
-                   dependencies : [threads],
-                   install_rpath : rootlibexecdir,
-                   install : true,
-                   install_dir : rootlibexecdir)
+#if conf.get('ENABLE_NETWORKD') == 111
+#        executable('systemd-networkd',
+#                   systemd_networkd_sources,
+#                   include_directories : network_include_dir,
+#                   link_with : [libnetworkd_core,
+#                                libsystemd_network,
+#                                libudev_static,
+#                                networkd_link_with],
+#                   dependencies : [threads],
+#                   install_rpath : rootlibexecdir,
+#                   install : true,
+#                   install_dir : rootlibexecdir)
 
-        executable('systemd-networkd-wait-online',
-                   systemd_networkd_wait_online_sources,
-                   include_directories : includes,
-                   link_with : [libnetworkd_core,
-                                networkd_link_with],
-                   install_rpath : rootlibexecdir,
-                   install : true,
-                   install_dir : rootlibexecdir)
+#        executable('systemd-networkd-wait-online',
+#                   systemd_networkd_wait_online_sources,
+#                   include_directories : includes,
+#                   link_with : [libnetworkd_core,
+#                                networkd_link_with],
+#                   install_rpath : rootlibexecdir,
+#                   install : true,
+#                   install_dir : rootlibexecdir)
 
-        exe = executable('networkctl',
-                   networkctl_sources,
-                   include_directories : includes,
-                   link_with : [libsystemd_network,
-                              networkd_link_with],
-                   install_rpath : rootlibexecdir,
-                   install : true,
-                   install_dir : rootbindir)
-        public_programs += exe
+#        exe = executable('networkctl',
+#                   networkctl_sources,
+#                   include_directories : includes,
+#                   link_with : [libsystemd_network,
+#                              networkd_link_with],
+#                   install_rpath : rootlibexecdir,
+#                   install : true,
+#                   install_dir : rootbindir)
+#        public_programs += exe
 
-        executable('systemd-network-generator',
-                   network_generator_sources,
-                   include_directories : includes,
-                   link_with : [networkd_link_with],
-                   install_rpath : rootlibexecdir,
-                   install : true,
-                   install_dir : rootlibexecdir)
-endif
+#        executable('systemd-network-generator',
+#                   network_generator_sources,
+#                   include_directories : includes,
+#                   link_with : [networkd_link_with],
+#                   install_rpath : rootlibexecdir,
+#                   install : true,
+#                   install_dir : rootlibexecdir)
+#endif
 
 #executable('systemd-sulogin-shell',
 #           ['src/sulogin-shell/sulogin-shell.c'],

@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1+ */
 #pragma once
 
-#if defined(__GLIBC__)
-#include <printf.h>
-#endif
+//#if defined(__GLIBC__)
+//#include <printf.h>
+//#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <sys/types.h>

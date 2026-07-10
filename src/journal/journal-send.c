@@ -2,9 +2,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#if defined(__GLIBC__)
-#include <printf.h>
-#endif
+//#if defined(__GLIBC__)
+//#include <printf.h>
+//#endif
 #include <stddef.h>
 #include <sys/un.h>
 #include <unistd.h>
